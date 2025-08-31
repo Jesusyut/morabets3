@@ -55,6 +55,9 @@ PRICE_YEARLY = os.environ.get("STRIPE_PRICE_ID_YEARLY")
 TRIAL_DAYS = int(os.environ.get("TRIAL_DAYS", "3"))
 APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:5000")
 
+# Enable attaching MLB contextual info to props (default off)
+ENRICHMENT_ENABLED = os.getenv("ENRICHMENT_ENABLED","false").lower() == "true"
+
 # Legacy price lookup for backward compatibility
 PRICE_LOOKUP = {
     'prod_SjjH7D6kkxRbJf': 'price_1RoFpPIzLEeC8QTz5kdeiLyf',  # Calculator Tool - $9.99/month
@@ -442,6 +445,30 @@ def get_props():
 
         if league == "mlb":
             props = fetch_mlb_player_props()
+            
+            # Apply MLB contextual enrichment (guarded by feature flag)
+            try:
+                if ENRICHMENT_ENABLED:
+                    from contextual import get_mlb_contextual_hit_rate_cached
+                    for p in props:
+                        # ONLY touch MLB batter props; never block or throw.
+                        if str(p.get("league","")).lower() == "mlb" and "batter" in str(p.get("stat","")).lower():
+                            try:
+                                ctx = get_mlb_contextual_hit_rate_cached(
+                                    p.get("player",""),
+                                    p.get("stat",""),
+                                    float(p.get("line", 0) or 0)
+                                )
+                                # attach without changing existing schema relied on by UI
+                                enrich_block = p.setdefault("enrichment", {})
+                                enrich_block["mlb_context"] = ctx
+                            except Exception:
+                                # swallow all errors to avoid breaking baseline
+                                pass
+            except Exception:
+                # never break the endpoint if something goes wrong
+                pass
+            
             # Group by matchup - need to create matchup from event data
             grouped = {}
             for prop in props:
