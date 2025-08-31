@@ -27,13 +27,8 @@
     .tiny-link{display:inline-flex;align-items:center;gap:6px;color:#9dd0ff;font-size:12px;cursor:pointer;text-decoration:none;border-bottom:1px dashed #2b3245}
     .tiny-link:hover{color:#cfe6ff}
     
-    /* Market tabs styles */
-    .tabs.market-tabs { margin-top: 8px; gap: 6px; }
-    .tabs.market-tabs .tab { 
-      font-size: 12px; 
-      padding: 6px 10px; 
-      line-height: 1; 
-    }
+    /* Hide market tabs (defensive) */
+    #market-tabs { display: none !important; }
     
     /* big loading overlay */
     .loading{
@@ -352,133 +347,104 @@ async function prefetchL10ForVisibleCards(N=90){
   }catch(e){}
 }
 
-// ------------- MARKET TABS FUNCTIONALITY -------------
+// ------------- STAT SUGGESTIONS FUNCTIONALITY -------------
 (() => {
-  // ------------- CONFIG (no backend changes) -------------
-  const MARKETS_BY_LEAGUE = {
-    mlb: [
-      "player_hits","player_total_bases","player_home_runs","player_rbis","player_runs",
-      "player_stolen_bases","pitcher_strikeouts","pitcher_outs","pitcher_hits_allowed",
-      "pitcher_walks","pitcher_earned_runs"
-    ],
-    nfl: [
-      "player_pass_yds","player_pass_tds","player_rush_yds","player_rush_attempts",
-      "player_rush_tds","player_reception_yds","player_receptions","player_reception_tds",
-      "player_anytime_td"
-    ],
-    ncaaf: [
-      "player_pass_yds","player_pass_tds","player_rush_yds","player_rush_attempts",
-      "player_rush_tds","player_reception_yds","player_receptions","player_reception_tds",
-      "player_anytime_td"
-    ],
-    ufc: ["fight_total_rounds"]
-  };
-
-  // ------------- STATE -------------
-  let selectedLeague = "mlb";
-  let selectedMarket = null;
-
-  // ------------- DOM helpers -------------
-  function ensureMarketBar() {
-    // Place directly under the search input (uses the existing '.search' class)
-    const searchEl = document.querySelector('.search');
-    if (!searchEl) return null;
-    let bar = document.getElementById('market-tabs');
-    if (!bar) {
-      bar = document.createElement('div');
-      bar.id = 'market-tabs';
-      bar.className = 'tabs market-tabs';
-      searchEl.insertAdjacentElement('afterend', bar);
-    }
-    return bar;
-  }
-
-  function renderMarketTabs(league) {
-    selectedLeague = (league || selectedLeague || 'mlb').toLowerCase();
-    const bar = ensureMarketBar();
-    if (!bar) return;
-
-    const markets = MARKETS_BY_LEAGUE[selectedLeague] || [];
-    bar.innerHTML = markets.map(m => {
-      const active = (m === selectedMarket) ? ' active' : '';
-      return `<button class="tab${active}" data-market="${m}" type="button">${m}</button>`;
-    }).join('');
-
-    bar.onclick = (e) => {
-      const btn = e.target.closest('[data-market]');
-      if (!btn) return;
-      const m = btn.getAttribute('data-market');
-      selectedMarket = (selectedMarket === m) ? null : m; // toggle
-      renderMarketTabs(selectedLeague); // refresh active state
-      // Trigger a re-render using current data pipeline
-      // We assume you have a render function that uses a cached "currentProps" list.
-      try { reRenderWithMarketFilter(); } catch(_) {}
+  // ---------- Config ----------
+  const MAP = (() => {
+    const m = {
+      mlb: [
+        "batter_hits","player_hits",
+        "player_total_bases","player_home_runs","player_rbis","player_runs","player_stolen_bases",
+        "pitcher_strikeouts","pitcher_outs","pitcher_hits_allowed","pitcher_walks","pitcher_earned_runs"
+      ],
+      nfl: [
+        "player_pass_yds","player_pass_tds",
+        "player_rush_yds","player_rush_attempts","player_rush_tds",
+        "player_reception_yds","player_receptions","player_reception_tds",
+        "player_anytime_td"
+      ],
+      ncaaf: [
+        "player_pass_yds","player_pass_tds",
+        "player_rush_yds","player_rush_attempts","player_rush_tds",
+        "player_reception_yds","player_receptions","player_reception_tds",
+        "player_anytime_td"
+      ],
+      ufc: ["fight_total_rounds"],
+      nba: [],
+      nhl: []
     };
+    // de-dup + alpha sort for cleanliness
+    for (const k of Object.keys(m)) {
+      m[k] = Array.from(new Set(m[k])).sort((a,b)=>a.localeCompare(b));
+    }
+    return m;
+  })();
+
+  // ---------- Remove/hide old market pills if present ----------
+  document.addEventListener('DOMContentLoaded', () => {
+    const old = document.getElementById('market-tabs');
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+  });
+  window.reRenderWithMarketFilter = window.reRenderWithMarketFilter || function(){};
+
+  // ---------- Datalist wiring ----------
+  function ensureDatalist() {
+    let dl = document.getElementById('stat-suggestions');
+    if (!dl) {
+      dl = document.createElement('datalist');
+      dl.id = 'stat-suggestions';
+      document.body.appendChild(dl);
+    }
+    const input = document.querySelector('.search');
+    if (input && input.getAttribute('list') !== 'stat-suggestions') {
+      input.setAttribute('list', 'stat-suggestions');
+      // keep your existing search handler untouched
+    }
+    return dl;
   }
 
-  // ------------- Sorting + Filtering -------------
-  function scoreRow(row) {
-    // "Highest rated" = highest probability of either side (Over/Under)
-    const p = (row && row.fair && row.fair.prob) || {};
-    const over = (typeof p.over === 'number') ? p.over : -1;
-    const under = (typeof p.under === 'number') ? p.under : -1;
-    return Math.max(over, under);
+  function setSuggestions(league) {
+    const dl = ensureDatalist();
+    const key = (league||'mlb').toLowerCase();
+    const items = MAP[key] || [];
+    dl.innerHTML = items.map(v => `<option value="${v}"></option>`).join('');
   }
 
-  function marketMatches(row) {
-    if (!selectedMarket) return true; // no filter
-    const stat = (row && row.stat) || '';
-    return stat.toLowerCase() === selectedMarket.toLowerCase();
+  // ---------- Detect active league on load ----------
+  function detectInitialLeague() {
+    const active = document.querySelector('.tabs .tab.active');
+    if (!active) return 'mlb';
+    const t = (active.textContent||'').trim().toLowerCase();
+    return ['mlb','nfl','ncaaf','ufc','nba','nhl'].includes(t) ? t : 'mlb';
   }
 
-  // Hook into your existing rendering pipeline.
-  // You likely already build a flat array of props and render them as cards.
-  // We wrap your existing "render list" call with a filter+sort.
-  // IMPORTANT: Replace `window.currentProps` and `window.renderProps` below if your names differ.
-  window.reRenderWithMarketFilter = function() {
-    if (!window.currentProps || !window.renderProps) return;
-    const filtered = window.currentProps.filter(marketMatches);
-    filtered.sort((a, b) => scoreRow(b) - scoreRow(a)); // highest -> lowest
-    window.renderProps(filtered);
-  };
-
-  // ------------- League change integration -------------
-  // Call this whenever league changes in your existing code.
-  // If your code calls loadLeague(league), patch it once:
-  const maybeWrapLoadLeague = () => {
+  // ---------- Integrate with existing league change flow ----------
+  function wrapLoadLeagueOnce() {
     const fn = window.loadLeague;
-    if (typeof fn === 'function' && !fn.__wrapped_for_markets__) {
+    if (typeof fn === 'function' && !fn.__wrapped_for_suggestions__) {
       window.loadLeague = async function(league, ...rest) {
-        renderMarketTabs(league);
         const result = await fn.call(this, league, ...rest);
-        // After data arrives, rebuild the filtered/sorted view
-        try { reRenderWithMarketFilter(); } catch(_) {}
+        setSuggestions(league);
         return result;
       };
-      window.loadLeague.__wrapped_for_markets__ = true;
+      window.loadLeague.__wrapped_for_suggestions__ = true;
     }
-  };
+  }
 
-  // If you don't have loadLeague, we also listen to clicks on league tabs (fallback).
+  // Fallback: listen for clicks on league tabs
   document.addEventListener('click', (e) => {
-    const tab = e.target.closest('.tabs .tab');
-    if (!tab) return;
-    const txt = (tab.textContent || '').trim().toLowerCase();
-    if (['mlb','nfl','ncaaf','ufc'].includes(txt)) {
-      renderMarketTabs(txt);
-      // Allow your existing listener to fetch data; after it does, our wrapper will sort.
+    const btn = e.target.closest('.tabs .tab');
+    if (!btn) return;
+    const t = (btn.textContent||'').trim().toLowerCase();
+    if (['mlb','nfl','ncaaf','ufc','nba','nhl'].includes(t)) {
+      setSuggestions(t);
     }
   });
 
-  // ------------- Boot -------------
+  // ---------- Boot ----------
   document.addEventListener('DOMContentLoaded', () => {
-    maybeWrapLoadLeague();
-    // Initial render with default league (or detect from active tab)
-    const activeLeagueTab = document.querySelector('.tabs .tab.active');
-    const initial = activeLeagueTab ? (activeLeagueTab.textContent||'mlb').trim().toLowerCase() : 'mlb';
-    renderMarketTabs(initial);
-    // First pass: if data already present
-    try { reRenderWithMarketFilter(); } catch(_) {}
+    wrapLoadLeagueOnce();
+    setSuggestions(detectInitialLeague());
   });
 })();
 </script>
