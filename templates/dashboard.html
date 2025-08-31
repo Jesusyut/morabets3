@@ -298,54 +298,49 @@
   loadLeague('mlb');
 })();
 
-async function prefetchL10ForVisibleCards(N=90){
-  const cards = Array.from(document.querySelectorAll('.card')).slice(0, N);
-  if (!cards.length) return;
-  // collect unique player/stat/line triples
-  const items = [];
-  const seen = new Set();
-  for (const c of cards) {
-    const title = c.querySelector('div[style*="font-weight:700"]')?.textContent?.trim();
-    const pill  = c.querySelector('.pill')?.textContent || "";
-    const m = pill.match(/^(.+?)\s+([0-9.]+)/);  // "total_bases 1.5"
-    if (!title || !m) continue;
-    const stat = m[1].trim();
-    const line = parseFloat(m[2]);
-    const key = `${title}|${stat}|${line}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    // map to backend form (batter_* etc.) — you already have this mapper in the file
-    const mapped = mapStatForContext(stat);
-    items.push({ player_name: title, stat_type: mapped, threshold: line });
-  }
-  if (!items.length) return;
-
-  try{
-    const r = await fetch('/contextual/hit_rates', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({items}) });
-    if (!r.ok) return;
-    const js = await r.json();
-    const byKey = new Map();
-    for (const x of js.results || []) {
-      const k = `${x.player_name||''}|${(x.stat_type||'').toLowerCase()}|${x.threshold}`;
-      byKey.set(k, x);
-    }
-    // attach to cards
-    for (const c of cards) {
-      const title = c.querySelector('div[style*="font-weight:700"]')?.textContent?.trim();
-      const pill  = c.querySelector('.pill')?.textContent || "";
-      const m = pill.match(/^(.+?)\s+([0-9.]+)/);
-      if (!title || !m) continue;
-      const stat = m[1].trim();
-      const line = parseFloat(m[2]);
-      const mapped = mapStatForContext(stat).toLowerCase();
-      const k = `${title}|${mapped}|${line}`;
-      const hit = byKey.get(k);
-      if (hit) {
-        c.dataset.l10 = JSON.stringify(hit);   // allow instant modal
-      }
-    }
-  }catch(e){}
+// define once, above prefetchL10ForVisibleCards
+function mapStatForContext(statKey, line) {
+  const k = String(statKey || '').toLowerCase();
+  const th = Number(line) || 1;
+  if (k.includes('batter_hits')) return { stat: 'hits', threshold: Math.max(1, Math.round(th)) };
+  if (k.includes('batter_total_bases')) return { stat: 'total_bases', threshold: th };
+  if (k.includes('batter_home_runs')) return { stat: 'home_runs', threshold: th || 1 };
+  if (k.includes('batter_rbis')) return { stat: 'rbi', threshold: th || 1 };
+  if (k.includes('batter_runs_scored')) return { stat: 'runs', threshold: th || 1 };
+  return null; // unknown stat -> skip prefetch
 }
+
+function inViewport(el){
+  const r = el.getBoundingClientRect();
+  return r.top < window.innerHeight && r.bottom > 0;
+}
+
+async function prefetchL10ForVisibleCards() {
+  const cards = [...document.querySelectorAll('.prop-card')].filter(inViewport);
+  const jobs = cards.map(async (card) => {
+    try {
+      if (card.dataset.trendLoaded === '1') return;
+      const mapped = mapStatForContext(card.dataset.stat, card.dataset.line);
+      if (!mapped) return;
+      const url = `/api/trends/l10?player=${encodeURIComponent(card.dataset.player)}&stat=${mapped.stat}&threshold=${mapped.threshold}`;
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      renderTrend(card, data);
+      card.dataset.trendLoaded = '1';
+    } catch (e) {
+      console.debug('prefetchL10 error', e);
+    }
+  });
+  await Promise.allSettled(jobs);
+}
+
+// optional: debounce to avoid hammering on scroll
+const debounce = (fn, ms=300) => {
+  let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+};
+window.addEventListener('load', prefetchL10ForVisibleCards);
+document.addEventListener('scroll', debounce(prefetchL10ForVisibleCards, 300), { passive: true });
 
 // ------------- STAT SUGGESTIONS FUNCTIONALITY -------------
 (() => {
