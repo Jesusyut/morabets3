@@ -65,6 +65,10 @@
 
     <div class="toolbar">
       <input id="q" class="search" placeholder="Search players or stats…" />
+      <div id="sortMode" class="tabs" style="margin-left:auto">
+        <button id="sortOver"  class="tab sorttab" data-sort="over">Over</button>
+        <button id="sortUnder" class="tab sorttab" data-sort="under">Under</button>
+      </div>
     </div>
 
     <div id="props" class="grid"></div>
@@ -99,6 +103,45 @@
   const esc = (s)=> (s??'').toString().replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[m]));
   const pct = (x)=> Math.round((Number(x)||0)*100);
   function americanToProb(odds){ if(odds==null) return 0; const o=Number(odds); if(!isFinite(o)||o===0) return 0; return o>0?100/(o+100):(-o)/(100-o); }
+
+  // -------------- tiny additions for toggle --------------
+  let SORTMODE = localStorage.getItem('sortMode') || 'over';
+  let PROPS_CACHE = []; // last fetched list
+
+  function scoreUnder(p){
+    const u = p?.fair?.prob?.under ?? null;
+    if (typeof u === 'number' && u >= 0) return u;      // real under prob
+    const o = p?.fair?.prob?.over ?? null;              // fallback if only 'over' exists
+    return (typeof o === 'number') ? (1 - o) : 0;
+  }
+
+  function resortAndRender(){
+    const cmp = (a,b) => SORTMODE === 'under'
+      ? (scoreUnder(b) - scoreUnder(a))
+      : ((p=>p?.fair?.prob?.over ?? 0)(b) - (p=>p?.fair?.prob?.over ?? 0)(a));
+    const arr = PROPS_CACHE.slice().sort(cmp);
+    countEl.textContent = arr.length.toLocaleString();
+    grid.innerHTML = arr.length ? arr.map(renderCard).join('') : `<div class="card"><div class="muted">No props found.</div></div>`;
+    if (typeof prefetchL10ForVisibleCards === 'function') prefetchL10ForVisibleCards(90);
+  }
+
+  (function initSortToggle(){
+    const bar = document.getElementById('sortMode');
+    if (!bar) return;
+    function sync(){
+      document.getElementById('sortOver')?.classList.toggle('active', SORTMODE === 'over');
+      document.getElementById('sortUnder')?.classList.toggle('active', SORTMODE === 'under');
+    }
+    bar.addEventListener('click', (e)=>{
+      const btn = e.target.closest('[data-sort]');
+      if (!btn) return;
+      SORTMODE = btn.dataset.sort;
+      localStorage.setItem('sortMode', SORTMODE);
+      sync();
+      resortAndRender(); // re-rank instantly, no refetch
+    });
+    sync();
+  })();
 
   // NEW: map FE stat names to backend's expected names (batter_* etc.)
   function mapStatForContext(s){
@@ -194,14 +237,9 @@
     countEl.textContent = '–';
 
     const all = await fetchAllProps();
-    all.sort((a,b)=> scoreOver(b) - scoreOver(a));
-
-    countEl.textContent = all.length.toLocaleString();
-    grid.innerHTML = all.length ? all.map(renderCard).join('') : `<div class="card"><div class="muted">No props found.</div></div>`;
+    PROPS_CACHE = all;
+    resortAndRender();
     loader.style.display = 'none';
-    
-    // Prefetch L10 data for visible cards
-    prefetchL10ForVisibleCards(90);
   }
 
   // search filter
