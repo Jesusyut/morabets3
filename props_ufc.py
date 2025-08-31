@@ -1,16 +1,16 @@
-# props_ufc.py
+# props_ufc.py - Odds-only UFC props
 from __future__ import annotations
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
+from datetime import datetime, timedelta, timezone
 
 from odds_client_ufc import list_events_ufc, event_markets_ufc, event_odds_ufc
-from markets_ufc import UFC_ML_MARKET, UFC_MOV_PATTERNS, MOV_CANON
-from novig_multi import novig_two_way, novig_multiway, prob_to_american
-from ufc_enrichment import lookup_bio
+from markets_ufc import UFC_ML_MARKET, UFC_MOV_PATTERNS, UFC_TOTALS_MARKETS, MOV_CANON
+from novig import novig_two_way, american_to_prob
+import perf
 
 MAX_WORKERS = int(os.getenv("ODDS_WORKERS", "4"))
-import perf
 
 def _any_matches(s: str, pats: List[str]) -> bool:
     t = s.lower()
@@ -41,10 +41,10 @@ def _collect_ml(bookmakers: List[Dict[str,Any]], fighters: Tuple[str,str]) -> Li
         pa, pb = novig_two_way(best[a]["price"], best[b]["price"])
         rows.append({"type":"ml","fighter":a,"opponent":b,
                      "shop":{"ml":{"american":best[a]["price"],"book":best[a]["book"]}},
-                     "fair":{"prob":{"ml":pa},"american":{"ml":prob_to_american(pa)}}})
+                     "fair":{"prob":{"ml":pa},"american":{"ml":best[a]["price"]}}})
         rows.append({"type":"ml","fighter":b,"opponent":a,
                      "shop":{"ml":{"american":best[b]["price"],"book":best[b]["book"]}},
-                     "fair":{"prob":{"ml":pb},"american":{"ml":prob_to_american(pb)}}})
+                     "fair":{"prob":{"ml":pb},"american":{"ml":best[b]["price"]}}})
     return rows
 
 def _collect_mov(bookmakers: List[Dict[str,Any]], fighter: str) -> Dict[str, Any]:
@@ -68,63 +68,144 @@ def _collect_mov(bookmakers: List[Dict[str,Any]], fighter: str) -> Dict[str, Any
     if len(have) < 2: return {}
     odds = [best[b]["price"] for b in ("ko","sub","dec") if best[b]]
     buckets = [b for b in ("ko","sub","dec") if best[b]]
-    probs = novig_multiway(odds)
-    fair_prob = dict(zip(buckets, probs))
-    fair_amer = {b: prob_to_american(p) for b,p in fair_prob.items()}
+    # Use american_to_prob for individual probabilities
+    fair_prob = {}
+    fair_amer = {}
+    for bucket in buckets:
+        if best[bucket]:
+            prob = american_to_prob(best[bucket]["price"])
+            fair_prob[bucket] = prob
+            fair_amer[bucket] = best[bucket]["price"]
     return {"buckets": {b: {"american": best[b]["price"], "book": best[b]["book"]} for b in buckets},
             "fair": {"prob": fair_prob, "american": fair_amer}}
 
-def fetch_ufc_props(date: str | None = None) -> List[Dict[str,Any]]:
-    with perf.span("ufc:fetch_props", {"date": date or ""}):
-        events = list_events_ufc(date=date)
+def fetch_ufc_totals_props(date_iso: Optional[str] = None, hours_ahead: int = 96) -> List[Dict[str, Any]]:
+    """
+    Fetch UFC totals O/U props for fight duration.
+    Returns list of props in the required schema for /player_props endpoint.
+    """
+    with perf.span("ufc:fetch_totals_props", {"date": date_iso or "", "hours": hours_ahead}):
+        # Get events within time window
+        events = list_events_ufc(hours_ahead=hours_ahead, date=date_iso)
         perf.mark("ufc.events_seen", len(events))
-        fights: List[Dict[str,Any]] = []
-
-        def _one(ev):
-            with perf.span("ufc:event_build", {"eid": ev.get("id")}):
-                out = None
+        
+        all_props = []
+        
+        def _process_event(ev):
+            with perf.span("ufc:event_totals", {"eid": ev.get("id")}):
                 eid = ev.get("id")
-                if not eid: return out
-                a, b = ev.get("home_team",""), ev.get("away_team","")
-                matchup = f"{b} vs {a}" if a and b else (ev.get("commence_time") or "TBD")
+                if not eid:
+                    return []
+                
+                away_team = ev.get("away_team", "")
+                home_team = ev.get("home_team", "")
+                if not away_team or not home_team:
+                    return []
+                
+                # Build matchup as "Fighter A vs Fighter B"
+                matchup = f"{away_team} vs {home_team}"
+                
+                # Get available markets for this event
                 try:
                     mk = event_markets_ufc(eid)
                     seen_keys = {k for bk in mk.get("bookmakers", []) for k in (bk.get("markets") or [])}
                 except Exception:
                     seen_keys = set()
-                want = [UFC_ML_MARKET]
-                mov_keys = [k for k in seen_keys if _any_matches(k, UFC_MOV_PATTERNS)]
-                want.extend(sorted(set(mov_keys)))
-                data = event_odds_ufc(eid, want)
-                bms = data.get("bookmakers", [])
-                ml_rows = _collect_ml(bms, (a, b))
-                mov_a = _collect_mov(bms, a) if a else {}
-                mov_b = _collect_mov(bms, b) if b else {}
-                bio_a = lookup_bio(a); bio_b = lookup_bio(b)
-                out = {"league":"ufc","event_id":eid,"matchup":matchup,
-                       "fighters":[
-                           {"name":a,"ml":[r for r in ml_rows if r["fighter"]==a],"mov":mov_a,"bio":bio_a},
-                           {"name":b,"ml":[r for r in ml_rows if r["fighter"]==b],"mov":mov_b,"bio":bio_b},
-                       ]}
-                return out
-
+                
+                # Find totals markets
+                totals_markets = [k for k in seen_keys if _any_matches(k, UFC_TOTALS_MARKETS)]
+                if not totals_markets:
+                    return []
+                
+                # Fetch odds for totals markets
+                try:
+                    data = event_odds_ufc(eid, totals_markets)
+                except Exception:
+                    return []
+                
+                bookmakers = data.get("bookmakers", [])
+                if not bookmakers:
+                    return []
+                
+                # Process each totals market
+                event_props = []
+                for market in totals_markets:
+                    for bm in bookmakers:
+                        book_key = bm.get("key", "")
+                        
+                        # Find the totals market
+                        for mk in bm.get("markets", []):
+                            if mk.get("key") != market:
+                                continue
+                            
+                            # Look for over/under outcomes
+                            over_outcome = None
+                            under_outcome = None
+                            line_value = None
+                            
+                            for outcome in mk.get("outcomes", []):
+                                name = (outcome.get("name") or "").lower()
+                                if "over" in name:
+                                    over_outcome = outcome
+                                    line_value = outcome.get("point")
+                                elif "under" in name:
+                                    under_outcome = outcome
+                                    if line_value is None:
+                                        line_value = outcome.get("point")
+                            
+                            # Only process if we have both sides and a line
+                            if over_outcome and under_outcome and line_value is not None:
+                                over_price = over_outcome.get("price")
+                                under_price = under_outcome.get("price")
+                                
+                                if over_price is not None and under_price is not None:
+                                    # Compute fair no-vig probabilities
+                                    p_over, p_under = novig_two_way(over_price, under_price)
+                                    
+                                    # Build prop in required schema
+                                    prop = {
+                                        "league": "ufc",
+                                        "matchup": matchup,
+                                        "player": matchup,  # Same as matchup for UFC
+                                        "stat": "fight_total_rounds",
+                                        "line": float(line_value),
+                                        "shop": {
+                                            "over": int(over_price),
+                                            "under": int(under_price),
+                                            "book": book_key
+                                        },
+                                        "fair": {
+                                            "prob": {
+                                                "over": p_over,
+                                                "under": p_under
+                                            }
+                                        }
+                                    }
+                                    event_props.append(prop)
+                                    
+                                    # Only process first bookmaker with valid data
+                                    break
+                
+                return event_props
+        
+        # Process events concurrently
         with perf.span("ufc:concurrency", {"workers": MAX_WORKERS}):
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-                futs = [ex.submit(_one, ev) for ev in events]
-                for f in as_completed(futs):
-                    res = f.result()
-                    if res: fights.append(res)
+                futures = [ex.submit(_process_event, ev) for ev in events]
+                for future in as_completed(futures):
+                    try:
+                        event_props = future.result()
+                        all_props.extend(event_props)
+                    except Exception as e:
+                        perf.mark("ufc:event_error", 1)
+                        continue
+        
+        perf.mark("ufc:total_props", len(all_props))
+        return all_props
 
-        with perf.span("ufc:sort_fights", {"n": len(fights)}):
-            def fav_prob(f):
-                probs=[]
-                for fx in f["fighters"]:
-                    for r in fx.get("ml", []):
-                        p=((r.get("fair") or {}).get("prob") or {}).get("ml")
-                        if isinstance(p,(int,float)): probs.append(p)
-                return max(probs) if probs else 0.0
-            fights.sort(key=fav_prob, reverse=True)
-        return fights
+def fetch_ufc_props(date: str | None = None) -> List[Dict[str,Any]]:
+    """Legacy function - now returns totals props in new format"""
+    return fetch_ufc_totals_props(date_iso=date)
 
 # Back-compat alias if earlier code called fetch_ufc_markets()
 def fetch_ufc_markets(*args, **kwargs):
