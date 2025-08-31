@@ -108,20 +108,34 @@
   let SORTMODE = localStorage.getItem('sortMode') || 'over';
   let PROPS_CACHE = []; // last fetched list
 
+  const UNDER_MIN = 0.80; // 80%
+
+  function hasUnderOffered(p){
+    const u = p?.fair?.prob?.under;
+    return typeof u === 'number' && u > 0 && u < 1;
+  }
+
+  function scoreOver(p){ return p?.fair?.prob?.over ?? 0; } // keep your existing if you already have it
   function scoreUnder(p){
-    const u = p?.fair?.prob?.under ?? null;
-    if (typeof u === 'number' && u >= 0) return u;      // real under prob
-    const o = p?.fair?.prob?.over ?? null;              // fallback if only 'over' exists
-    return (typeof o === 'number') ? (1 - o) : 0;
+    const u = p?.fair?.prob?.under;
+    if (typeof u === 'number') return u;        // only count true two-way markets
+    return 0; // if we don't have a true 'under', treat as not offered
   }
 
   function resortAndRender(){
-    const cmp = (a,b) => SORTMODE === 'under'
-      ? (scoreUnder(b) - scoreUnder(a))
-      : ((p=>p?.fair?.prob?.over ?? 0)(b) - (p=>p?.fair?.prob?.over ?? 0)(a));
-    const arr = PROPS_CACHE.slice().sort(cmp);
+    let arr = PROPS_CACHE.slice();
+    if (SORTMODE === 'under') {
+      arr = arr
+        .filter(hasUnderOffered)                 // only two-way markets
+        .filter(p => scoreUnder(p) >= UNDER_MIN) // ≥ 80%
+        .sort((a,b) => scoreUnder(b) - scoreUnder(a));
+    } else {
+      arr = arr.sort((a,b) => scoreOver(b) - scoreOver(a));
+    }
     countEl.textContent = arr.length.toLocaleString();
-    grid.innerHTML = arr.length ? arr.map(renderCard).join('') : `<div class="card"><div class="muted">No props found.</div></div>`;
+    grid.innerHTML = arr.length
+      ? arr.map(renderCard).join('')
+      : `<div class="card"><div class="muted">No Under bets ≥ ${(UNDER_MIN*100)|0}% found.</div></div>`;
     if (typeof prefetchL10ForVisibleCards === 'function') prefetchL10ForVisibleCards(90);
   }
 

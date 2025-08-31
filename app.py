@@ -19,7 +19,7 @@ from props_ufc import fetch_ufc_totals_props
 
 # Helper modules
 from novig import american_to_prob, novig_two_way
-from cache_ttl import metrics as cache_metrics
+from cache_ttl import metrics as cache_metrics, get as cache_get, setex as cache_setex
 import perf
 
 log = logging.getLogger("app")
@@ -431,6 +431,15 @@ def get_props():
         date_str = request.args.get("date")  # YYYY-MM-DD optional
         log.info("props: league=%s (norm=%s) date=%s", league_in, league, date_str)
 
+        # --- tiny cache wrapper (safe) ---
+        ttl = int(os.getenv("PROPS_CACHE_SEC", "60"))
+        nocache = request.args.get("nocache") == "1"
+        cache_key = f"props:{league}:{date_str or ''}"
+        if not nocache:
+            cached = cache_get(cache_key)
+            if cached is not None:
+                return jsonify(cached)
+
         if league == "mlb":
             props = fetch_mlb_player_props()
             # Group by matchup - need to create matchup from event data
@@ -444,6 +453,12 @@ def get_props():
                 if matchup not in grouped:
                     grouped[matchup] = []
                 grouped[matchup].append(prop)
+            
+            # Set cache before returning
+            try:
+                cache_setex(cache_key, ttl, grouped)
+            except Exception:
+                pass
             return jsonify(grouped)
 
         elif league == "nfl":
@@ -455,6 +470,12 @@ def get_props():
                 if matchup not in grouped:
                     grouped[matchup] = []
                 grouped[matchup].append(prop)
+            
+            # Set cache before returning
+            try:
+                cache_setex(cache_key, ttl, grouped)
+            except Exception:
+                pass
             return jsonify(grouped)
 
         elif league == "ncaaf":
@@ -466,6 +487,12 @@ def get_props():
                 if matchup not in grouped:
                     grouped[matchup] = []
                 grouped[matchup].append(prop)
+            
+            # Set cache before returning
+            try:
+                cache_setex(cache_key, ttl, grouped)
+            except Exception:
+                pass
             return jsonify(grouped)
 
         elif league == "ufc":
@@ -478,6 +505,12 @@ def get_props():
                 if matchup not in grouped:
                     grouped[matchup] = []
                 grouped[matchup].append(prop)
+            
+            # Set cache before returning
+            try:
+                cache_setex(cache_key, ttl, grouped)
+            except Exception:
+                pass
             return jsonify(grouped)
 
         else:
