@@ -30,8 +30,15 @@ def attach_mlb_ai_overlay(props: list, min_edge: float = 0.06):
     """
     # Placeholder implementation - replace with actual content
     for prop in props:
-        if (str(prop.get("league", "")).lower() == "mlb" and 
-            "batter" in str(prop.get("stat", "")).lower()):
+        stat = str(prop.get("stat","")).lower()
+        if str(prop.get("league","")).lower() != "mlb":
+            continue
+        STAT_OK = {"batter_hits","hits","batter_total_bases","total_bases","tb",
+                   "batter_home_runs","home_runs","batter_runs","runs",
+                   "batter_runs_batted_in","rbi","batter_walks","walks",
+                   "batter_stolen_bases","stolen_bases"}
+        if ("batter" not in stat) and (stat not in STAT_OK):
+            continue
             
             # Get contextual data if available
             contextual_data = None

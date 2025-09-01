@@ -667,6 +667,17 @@ def _ensure_fair_prob(prop):
     except Exception:
         pass
 
+    # try flat key if you use it
+    try:
+        p_over = float(prop.get("fair_prob_over"))
+        if 0 <= p_over <= 1:
+            prop.setdefault("fair", {}).setdefault("prob", {})
+            prop["fair"]["prob"]["over"] = round(p_over, 6)
+            prop["fair"]["prob"]["under"] = round(1.0 - p_over, 6)
+            return True
+    except Exception:
+        pass
+
     over_odds, under_odds = _extract_american_odds(prop)
     if over_odds is None or under_odds is None:
         return False
