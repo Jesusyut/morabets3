@@ -22,6 +22,18 @@ from novig import american_to_prob, novig_two_way
 from cache_ttl import metrics as cache_metrics, get as cache_get, setex as cache_setex
 import perf
 
+# --- HOT-PATH CACHE (simple per-process TTL) ---
+_RESP_CACHE = {}  # key -> (ts, payload)
+
+def _cache_get(key, ttl=30):
+    item = _RESP_CACHE.get(key)
+    if not item: return None
+    ts, payload = item
+    return payload if (time.time() - ts) < ttl else None
+
+def _cache_set(key, payload):
+    _RESP_CACHE[key] = (time.time(), payload)
+
 log = logging.getLogger("app")
 log.setLevel(logging.INFO)
 
@@ -437,6 +449,14 @@ def get_props():
         date_str = request.args.get("date")  # YYYY-MM-DD optional
         log.info("props: league=%s (norm=%s) date=%s", league_in, league, date_str)
 
+        # Hot-path cache check
+        cache_key = f"props:{request.args.get('league','all')}:{request.args.get('date','today')}:{session.get('user_tier','free')}"
+        hit = _cache_get(cache_key, ttl=int(os.getenv("PROPS_TTL", "25")))
+        if hit is not None:
+            resp = jsonify(hit)
+            resp.headers["X-Cache"] = "HIT"
+            return resp
+
         # --- tiny cache wrapper (safe) ---
         ttl = int(os.getenv("PROPS_CACHE_SEC", "60"))
         nocache = request.args.get("nocache") == "1"
@@ -453,21 +473,35 @@ def get_props():
             try:
                 if ENRICHMENT_ENABLED:
                     from contextual import get_mlb_contextual_hit_rate_cached
+                    
+                    # --- Enrichment budget + local de-dup ---
+                    CTX_BUDGET_SEC = float(os.getenv("CTX_BUDGET_SEC", "1.8"))   # ~1.8s max spend
+                    CTX_MAX_PROPS  = int(os.getenv("CTX_MAX_PROPS", "200"))      # enrich at most 200 props
+                    deadline = time.time() + CTX_BUDGET_SEC
+                    _local_ctx_cache = {}  # (player, stat, line) -> context dict
+
+                    count = 0
                     for p in props:
-                        # ONLY touch MLB batter props; never block or throw.
-                        if str(p.get("league","")).lower() == "mlb" and "batter" in str(p.get("stat","")).lower():
-                            try:
-                                ctx = get_mlb_contextual_hit_rate_cached(
-                                    p.get("player",""),
-                                    p.get("stat",""),
-                                    float(p.get("line", 0) or 0)
-                                )
-                                # attach without changing existing schema relied on by UI
-                                enrich_block = p.setdefault("enrichment", {})
-                                enrich_block["mlb_context"] = ctx
-                            except Exception:
-                                # swallow all errors to avoid breaking baseline
-                                pass
+                        if count >= CTX_MAX_PROPS or time.time() > deadline:
+                            break
+                        stat = str(p.get("stat","")).lower()
+                        if ("batter" in stat) or (stat in {
+                            "batter_hits","hits","batter_total_bases","total_bases","tb",
+                            "batter_home_runs","home_runs","batter_runs","runs",
+                            "batter_runs_batted_in","rbi","batter_walks","walks",
+                            "batter_stolen_bases","stolen_bases"
+                        }):
+                            k = (p.get("player",""), p.get("stat",""), float(p.get("line",0) or 0.0))
+                            ctx = _local_ctx_cache.get(k)
+                            if ctx is None:
+                                try:
+                                    ctx = get_mlb_contextual_hit_rate_cached(*k)
+                                except Exception:
+                                    ctx = None
+                                _local_ctx_cache[k] = ctx
+                            if ctx:
+                                p.setdefault("enrichment", {})["mlb_context"] = ctx
+                                count += 1
             except Exception:
                 # never break the endpoint if something goes wrong
                 pass
@@ -504,7 +538,13 @@ def get_props():
                 cache_setex(cache_key, ttl, grouped)
             except Exception:
                 pass
-            return jsonify(grouped)
+            
+            # Set hot-path cache
+            payload = {"props": props, "meta": {"league": league, "date": date_str}}
+            _cache_set(cache_key, payload)
+            resp = jsonify(grouped)
+            resp.headers["X-Cache"] = "MISS"
+            return resp
 
         elif league == "nfl":
             props = fetch_nfl_player_props(hours_ahead=96)

@@ -84,10 +84,6 @@
 
     <div class="toolbar">
       <input id="q" class="search" placeholder="Search players or stats…" />
-      <div id="sortMode" class="tabs" style="margin-left:auto">
-        <button id="sortOver"  class="tab sorttab" data-sort="over">Over</button>
-        <button id="sortUnder" class="tab sorttab" data-sort="under">Under</button>
-      </div>
     </div>
     
     <!-- AI Sort Mode Toggle -->
@@ -136,24 +132,14 @@
   function americanToProb(odds){ if(odds==null) return 0; const o=Number(odds); if(!isFinite(o)||o===0) return 0; return o>0?100/(o+100):(-o)/(100-o); }
 
   // -------------- tiny additions for toggle --------------
-  let SORTMODE = localStorage.getItem('sortMode') || 'over';
   let SORT_TYPE = localStorage.getItem('sortType') || 'fair'; // 'fair' or 'ai'
   let PROPS_CACHE = []; // last fetched list
 
-  const UNDER_MIN = 0.80; // 80%
+  // Hardcode side to "over" since toggle is removed
+  const side = "over";
   const AI_MIN_EDGE = Number(window.AI_MIN_EDGE || 0.06); // from env or default
 
-  function hasUnderOffered(p){
-    const u = p?.fair?.prob?.under;
-    return typeof u === 'number' && u > 0 && u < 1;
-  }
-
-  function scoreOver(p){ return p?.fair?.prob?.over ?? 0; } // keep your existing if you already have it
-  function scoreUnder(p){
-    const u = p?.fair?.prob?.under;
-    if (typeof u === 'number') return u;        // only count true two-way markets
-    return 0; // if we don't have a true 'under', treat as not offered
-  }
+  function scoreOver(p){ return p?.fair?.prob?.over ?? 0; }
 
   // AI Overlay helper functions
   function fairScore(p, side) {
@@ -183,51 +169,21 @@
     let arr = PROPS_CACHE.slice();
     
     if (SORT_TYPE === "ai") {
-      // AI Edge sorting
-      if (SORTMODE === 'under') {
-        arr = arr
-          .filter(hasUnderOffered)
-          .filter(p => scoreUnder(p) >= UNDER_MIN)
-          .sort((a,b) => aiEdge(b, 'under') - aiEdge(a, 'under'));
-      } else {
-        arr = arr.sort((a,b) => aiEdge(b, 'over') - aiEdge(a, 'over'));
-      }
+      // AI Edge sorting (over only)
+      arr = arr.sort((a,b) => aiEdge(b, 'over') - aiEdge(a, 'over'));
     } else {
-      // Fair probability sorting (existing logic)
-      if (SORTMODE === 'under') {
-        arr = arr
-          .filter(hasUnderOffered)                 // only two-way markets
-          .filter(p => scoreUnder(p) >= UNDER_MIN) // ≥ 80%
-          .sort((a,b) => scoreUnder(b) - scoreUnder(a));
-      } else {
-        arr = arr.sort((a,b) => scoreOver(b) - scoreOver(a));
-      }
+      // Fair probability sorting (over only)
+      arr = arr.sort((a,b) => scoreOver(b) - scoreOver(a));
     }
     
     countEl.textContent = arr.length.toLocaleString();
     grid.innerHTML = arr.length
       ? arr.map(renderCard).join('')
-      : `<div class="card"><div class="muted">No ${SORTMODE === 'under' ? 'Under' : 'Over'} bets found.</div></div>`;
+      : `<div class="card"><div class="muted">No props found.</div></div>`;
     if (typeof prefetchL10ForVisibleCards === 'function') prefetchL10ForVisibleCards(90);
   }
 
-  (function initSortToggle(){
-    const bar = document.getElementById('sortMode');
-    if (!bar) return;
-    function sync(){
-      document.getElementById('sortOver')?.classList.toggle('active', SORTMODE === 'over');
-      document.getElementById('sortUnder')?.classList.toggle('active', SORTMODE === 'under');
-    }
-    bar.addEventListener('click', (e)=>{
-      const btn = e.target.closest('[data-sort]');
-      if (!btn) return;
-      SORTMODE = btn.dataset.sort;
-      localStorage.setItem('sortMode', SORTMODE);
-      sync();
-      resortAndRender(); // re-rank instantly, no refetch
-    });
-    sync();
-  })();
+
 
   // AI Sort Type Toggle
   (function initAISortToggle(){
@@ -320,9 +276,9 @@
     // Include meta.l10 data if available
     const metaL10 = p?.meta?.l10 ? ` data-meta-l10="${esc(JSON.stringify(p.meta.l10))}"` : '';
     
-    // Compute edge badge for AI mode
-    const edgeVal = SORTMODE === "over" ? p?.ai?.edge_over : p?.ai?.edge_under;
-    const edgeFlag = SORTMODE === "over" ? p?.ai?.flag_over : p?.ai?.flag_under;
+    // Compute edge badge for AI mode (hardcoded to "over")
+    const edgeVal = p?.ai?.edge_over;
+    const edgeFlag = p?.ai?.flag_over;
     const edgeBadge = (SORT_TYPE === "ai" && typeof edgeVal === "number" && edgeFlag) 
       ? `<div class="edge-badge">Edge +${Math.round(edgeVal * 100)}%</div>` 
       : '';
