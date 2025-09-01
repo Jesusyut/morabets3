@@ -58,6 +58,9 @@ APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:5000")
 # Enable attaching MLB contextual info to props (default off)
 ENRICHMENT_ENABLED = os.getenv("ENRICHMENT_ENABLED","false").lower() == "true"
 
+# Enable MLB AI overlay (default off)
+AI_OVERLAY_ENABLED = os.getenv("AI_OVERLAY_ENABLED","false").lower() == "true"
+
 # Legacy price lookup for backward compatibility
 PRICE_LOOKUP = {
     'prod_SjjH7D6kkxRbJf': 'price_1RoFpPIzLEeC8QTz5kdeiLyf',  # Calculator Tool - $9.99/month
@@ -467,6 +470,14 @@ def get_props():
                                 pass
             except Exception:
                 # never break the endpoint if something goes wrong
+                pass
+            
+            # Apply MLB AI overlay (guarded by feature flag)
+            try:
+                if AI_OVERLAY_ENABLED:
+                    from ai_overlay import attach_mlb_ai_overlay
+                    attach_mlb_ai_overlay(props, min_edge=float(os.getenv("AI_MIN_EDGE","0.06")))
+            except Exception:
                 pass
             
             # Group by matchup - need to create matchup from event data

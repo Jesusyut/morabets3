@@ -30,6 +30,25 @@
     /* Hide market tabs (defensive) */
     #market-tabs { display: none !important; }
     
+    /* AI Overlay UI Styles */
+    .toggle-row { display:flex; align-items:center; gap:12px; margin:8px 0 12px; }
+    .toggle-label { font-size:14px; opacity:.8; }
+    .toggle-group { display:inline-flex; background:#171a1f; padding:4px; border-radius:999px; }
+    .pill { border:0; background:transparent; color:#cbd5e1; padding:6px 12px; border-radius:999px; cursor:pointer; }
+    .pill.active { background:#2a2f39; color:#fff; }
+    .pill.disabled { opacity:.4; cursor:not-allowed; }
+    .mode-subtle { font-size:12px; opacity:.6; margin:4px 0 8px; }
+    .edge-badge {
+      display:inline-block;
+      font-size:12px;
+      padding:4px 8px;
+      border-radius:999px;
+      background:#0f3;
+      color:#06140a;
+      font-weight:600;
+      margin-bottom:8px;
+    }
+    
     /* big loading overlay */
     .loading{
       position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
@@ -70,6 +89,18 @@
         <button id="sortUnder" class="tab sorttab" data-sort="under">Under</button>
       </div>
     </div>
+    
+    <!-- AI Sort Mode Toggle -->
+    <div class="toggle-row">
+      <div class="toggle-label">Sort</div>
+      <div class="toggle-group">
+        <button id="sortFair" class="pill active" data-sort="fair">Fair</button>
+        <button id="sortAI" class="pill disabled" data-sort="ai" title="AI not available on these props yet">AI Edge (beta)</button>
+      </div>
+    </div>
+    
+    <!-- Mode indicator -->
+    <div id="modeIndicator" class="mode-subtle">Sorted by market fair probability</div>
 
     <div id="props" class="grid"></div>
   </div>
@@ -106,9 +137,11 @@
 
   // -------------- tiny additions for toggle --------------
   let SORTMODE = localStorage.getItem('sortMode') || 'over';
+  let SORT_TYPE = localStorage.getItem('sortType') || 'fair'; // 'fair' or 'ai'
   let PROPS_CACHE = []; // last fetched list
 
   const UNDER_MIN = 0.80; // 80%
+  const AI_MIN_EDGE = Number(window.AI_MIN_EDGE || 0.06); // from env or default
 
   function hasUnderOffered(p){
     const u = p?.fair?.prob?.under;
@@ -122,20 +155,59 @@
     return 0; // if we don't have a true 'under', treat as not offered
   }
 
+  // AI Overlay helper functions
+  function fairScore(p, side) {
+    // Be defensive: support both shapes you've used
+    const fair = p?.fair?.prob;
+    if (fair) {
+      return side === "over" ? Number(fair.over ?? 0) : Number(fair.under ?? 0);
+    }
+    // alt field if you stored it flat
+    const o = Number(p?.no_vig_prob_over ?? NaN);
+    const u = isFinite(o) ? 1 - o : NaN;
+    return side === "over" ? (isFinite(o) ? o : 0) : (isFinite(u) ? u : 0);
+  }
+
+  function aiEdge(p, side) {
+    const ai = p?.ai;
+    if (!ai) return Number.NEGATIVE_INFINITY;
+    const e = side === "over" ? ai.edge_over : ai.edge_under;
+    return typeof e === "number" ? e : Number.NEGATIVE_INFINITY;
+  }
+
+  function hasAnyAI() {
+    return Array.isArray(PROPS_CACHE) && PROPS_CACHE.some(p => p?.ai && (typeof p.ai.p_model_over === "number"));
+  }
+
   function resortAndRender(){
     let arr = PROPS_CACHE.slice();
-    if (SORTMODE === 'under') {
-      arr = arr
-        .filter(hasUnderOffered)                 // only two-way markets
-        .filter(p => scoreUnder(p) >= UNDER_MIN) // ≥ 80%
-        .sort((a,b) => scoreUnder(b) - scoreUnder(a));
+    
+    if (SORT_TYPE === "ai") {
+      // AI Edge sorting
+      if (SORTMODE === 'under') {
+        arr = arr
+          .filter(hasUnderOffered)
+          .filter(p => scoreUnder(p) >= UNDER_MIN)
+          .sort((a,b) => aiEdge(b, 'under') - aiEdge(a, 'under'));
+      } else {
+        arr = arr.sort((a,b) => aiEdge(b, 'over') - aiEdge(a, 'over'));
+      }
     } else {
-      arr = arr.sort((a,b) => scoreOver(b) - scoreOver(a));
+      // Fair probability sorting (existing logic)
+      if (SORTMODE === 'under') {
+        arr = arr
+          .filter(hasUnderOffered)                 // only two-way markets
+          .filter(p => scoreUnder(p) >= UNDER_MIN) // ≥ 80%
+          .sort((a,b) => scoreUnder(b) - scoreUnder(a));
+      } else {
+        arr = arr.sort((a,b) => scoreOver(b) - scoreOver(a));
+      }
     }
+    
     countEl.textContent = arr.length.toLocaleString();
     grid.innerHTML = arr.length
       ? arr.map(renderCard).join('')
-      : `<div class="card"><div class="muted">No Under bets ≥ ${(UNDER_MIN*100)|0}% found.</div></div>`;
+      : `<div class="card"><div class="muted">No ${SORTMODE === 'under' ? 'Under' : 'Over'} bets found.</div></div>`;
     if (typeof prefetchL10ForVisibleCards === 'function') prefetchL10ForVisibleCards(90);
   }
 
@@ -154,6 +226,44 @@
       sync();
       resortAndRender(); // re-rank instantly, no refetch
     });
+    sync();
+  })();
+
+  // AI Sort Type Toggle
+  (function initAISortToggle(){
+    const fairBtn = document.getElementById('sortFair');
+    const aiBtn = document.getElementById('sortAI');
+    const indicator = document.getElementById('modeIndicator');
+    
+    function sync(){
+      fairBtn?.classList.toggle('active', SORT_TYPE === 'fair');
+      aiBtn?.classList.toggle('active', SORT_TYPE === 'ai');
+      aiBtn?.classList.toggle('disabled', !hasAnyAI());
+      
+      // Update mode indicator
+      if (indicator) {
+        indicator.textContent = SORT_TYPE === "fair" 
+          ? "Sorted by market fair probability" 
+          : "Sorted by AI Edge (beta)";
+      }
+    }
+    
+    function handleClick(e){
+      const btn = e.target.closest('[data-sort]');
+      if (!btn) return;
+      
+      const newType = btn.dataset.sort;
+      if (newType === 'ai' && !hasAnyAI()) return; // prevent switching to AI if not available
+      
+      SORT_TYPE = newType;
+      localStorage.setItem('sortType', SORT_TYPE);
+      sync();
+      resortAndRender();
+    }
+    
+    fairBtn?.addEventListener('click', handleClick);
+    aiBtn?.addEventListener('click', handleClick);
+    
     sync();
   })();
 
@@ -210,6 +320,13 @@
     // Include meta.l10 data if available
     const metaL10 = p?.meta?.l10 ? ` data-meta-l10="${esc(JSON.stringify(p.meta.l10))}"` : '';
     
+    // Compute edge badge for AI mode
+    const edgeVal = SORTMODE === "over" ? p?.ai?.edge_over : p?.ai?.edge_under;
+    const edgeFlag = SORTMODE === "over" ? p?.ai?.flag_over : p?.ai?.flag_under;
+    const edgeBadge = (SORT_TYPE === "ai" && typeof edgeVal === "number" && edgeFlag) 
+      ? `<div class="edge-badge">Edge +${Math.round(edgeVal * 100)}%</div>` 
+      : '';
+    
     return `
       <div class="card" data-name="${esc((p.player||'').toLowerCase())}" data-stat="${esc(stat.toLowerCase())}"${metaL10}>
         <div class="row">
@@ -217,6 +334,7 @@
           <div class="pill">${esc(stat)} ${esc(p.line)}</div>
         </div>
         <div style="margin-top:8px;font-weight:700">${esc(p.player || '')}</div>
+        ${edgeBadge}
         <div style="margin-top:8px">${trendLinkHTML(p)}</div>
         <div style="margin-top:10px">
           <div class="over">Over ${over}%</div>
@@ -252,6 +370,14 @@
 
     const all = await fetchAllProps();
     PROPS_CACHE = all;
+    
+    // Refresh AI toggle state after loading new props
+    const aiBtn = document.getElementById('sortAI');
+    if (aiBtn) {
+      aiBtn.classList.toggle('disabled', !hasAnyAI());
+      aiBtn.title = hasAnyAI() ? "Sort by AI Edge (beta)" : "AI not available on these props yet";
+    }
+    
     resortAndRender();
     loader.style.display = 'none';
   }
