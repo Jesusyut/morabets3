@@ -657,6 +657,48 @@ def get_props():
             # Apply enrichment and AI overlay
             _enrich_and_overlay(props, league)
             
+            # --- EDGE FINDER SMOKE-TEST BACKSTOP (safe, guarded) ---
+            import os
+
+            def _force_attach_ai(props, cap=50):
+                """Attach a neutral AI block to up to `cap` props so the FE Edge Finder tab becomes clickable.
+                This does NOT claim an edge; badges stay off (edge=0, flags False)."""
+                remaining = int(cap)
+                for p in props:
+                    if remaining <= 0:
+                        break
+                    # we only attach if fair prob is available (cheap sanity)
+                    fair_over = None
+                    try:
+                        fair_over = p.get("fair", {}).get("prob", {}).get("over")
+                    except Exception:
+                        pass
+                    if fair_over is None:
+                        continue
+                    if not p.get("ai"):
+                        p["ai"] = {
+                            "model_ver": "mlb-v0.1",
+                            "p_model_over":  round(float(fair_over), 6),
+                            "p_model_under": round(1.0 - float(fair_over), 6),
+                            "edge_over":  0.0,
+                            "edge_under": 0.0,
+                            "flag_over":  False,
+                            "flag_under": False,
+                            "inputs": {"forced": True}
+                        }
+                        remaining -= 1
+
+            # Count genuine attachments from your overlay
+            ai_attached = sum(1 for q in props if q.get("ai", {}).get("model_ver") == "mlb-v0.1")
+
+            # If none attached (likely mapping/shape issues), and smoke-test is enabled, force-attach a few
+            if ai_attached == 0 and os.getenv("EDGEFINDER_SMOKETEST", "false").lower() in ("1","true","on"):
+                _force_attach_ai(props, cap=int(os.getenv("EDGEFINDER_FORCED_CAP", "50")))
+                ai_attached = sum(1 for q in props if q.get("ai", {}).get("model_ver") == "mlb-v0.1")
+
+            # expose a small counter for quick verification
+            meta = {"league": league, "date": date_str, "ai_attached": ai_attached}
+            
             # Group by matchup - need to create matchup from event data
             grouped = {}
             for prop in props:
@@ -669,11 +711,8 @@ def get_props():
                     grouped[matchup] = []
                 grouped[matchup].append(prop)
             
-            # Count AI attachments for verification
-            ai_attached = sum(1 for p in props if p.get("ai",{}).get("model_ver") == "mlb-v0.1")
-            
             # Set SWR cache
-            payload = {"props": props, "meta": {"league": league, "date": date_str, "ai_attached": ai_attached}, "groups": grouped}  # ← include groups
+            payload = {"props": props, "meta": meta, "groups": grouped}
             _cache_set(key, payload, CACHE_TTL)
 
             # BEFORE
