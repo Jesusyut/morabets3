@@ -91,7 +91,7 @@
       <div class="toggle-label">Sort</div>
       <div class="toggle-group">
         <button id="sortFair" class="pill active" data-sort="fair">Fair</button>
-        <button id="sortAI" class="pill disabled" data-sort="ai" title="AI not available on these props yet">AI Edge (beta)</button>
+                    <button id="sortAI" class="pill disabled" data-sort="ai" title="AI not available on these props yet">Edge Finder</button>
       </div>
     </div>
     
@@ -200,7 +200,7 @@
       if (indicator) {
         indicator.textContent = SORT_TYPE === "fair" 
           ? "Sorted by market fair probability" 
-          : "Sorted by AI Edge (beta)";
+          : "Sorted by Edge Finder";
       }
     }
     
@@ -331,7 +331,7 @@
     const aiBtn = document.getElementById('sortAI');
     if (aiBtn) {
       aiBtn.classList.toggle('disabled', !hasAnyAI());
-      aiBtn.title = hasAnyAI() ? "Sort by AI Edge (beta)" : "AI not available on these props yet";
+              aiBtn.title = hasAnyAI() ? "Sort by Edge Finder" : "AI not available on these props yet";
     }
     
     resortAndRender();

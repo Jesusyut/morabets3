@@ -685,9 +685,14 @@ def get_props():
                 grouped[matchup].append(prop)
             
             # Set SWR cache
-            payload = {"props": props, "meta": {"league": league, "date": date_str}}
+            payload = {"props": props, "meta": {"league": league, "date": date_str}, "groups": grouped}  # ← include groups
             _cache_set(key, payload, CACHE_TTL)
-            resp = jsonify(grouped)
+
+            # BEFORE
+            # resp = jsonify(grouped)
+
+            # AFTER (unify shape with cache; exposes props[*].ai to the client)
+            resp = jsonify(payload)
             resp.headers["X-Cache"] = "MISS"
             return resp
 
@@ -706,9 +711,14 @@ def get_props():
                 grouped[matchup].append(prop)
             
             # Set SWR cache
-            payload = {"props": props, "meta": {"league": league, "date": date_str}}
+            payload = {"props": props, "meta": {"league": league, "date": date_str}, "groups": grouped}  # ← include groups
             _cache_set(key, payload, CACHE_TTL)
-            resp = jsonify(grouped)
+
+            # BEFORE
+            # resp = jsonify(grouped)
+
+            # AFTER (unify shape with cache; exposes props[*].ai to the client)
+            resp = jsonify(payload)
             resp.headers["X-Cache"] = "MISS"
             return resp
 
@@ -727,9 +737,14 @@ def get_props():
                 grouped[matchup].append(prop)
             
             # Set SWR cache
-            payload = {"props": props, "meta": {"league": league, "date": date_str}}
+            payload = {"props": props, "meta": {"league": league, "date": date_str}, "groups": grouped}  # ← include groups
             _cache_set(key, payload, CACHE_TTL)
-            resp = jsonify(grouped)
+
+            # BEFORE
+            # resp = jsonify(grouped)
+
+            # AFTER (unify shape with cache; exposes props[*].ai to the client)
+            resp = jsonify(payload)
             resp.headers["X-Cache"] = "MISS"
             return resp
 
@@ -749,9 +764,14 @@ def get_props():
                 grouped[matchup].append(prop)
             
             # Set SWR cache
-            payload = {"props": props, "meta": {"league": league, "date": date_str}}
+            payload = {"props": props, "meta": {"league": league, "date": date_str}, "groups": grouped}  # ← include groups
             _cache_set(key, payload, CACHE_TTL)
-            resp = jsonify(grouped)
+
+            # BEFORE
+            # resp = jsonify(grouped)
+
+            # AFTER (unify shape with cache; exposes props[*].ai to the client)
+            resp = jsonify(payload)
             resp.headers["X-Cache"] = "MISS"
             return resp
 
