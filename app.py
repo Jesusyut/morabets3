@@ -22,17 +22,133 @@ from novig import american_to_prob, novig_two_way
 from cache_ttl import metrics as cache_metrics, get as cache_get, setex as cache_setex
 import perf
 
-# --- HOT-PATH CACHE (simple per-process TTL) ---
-_RESP_CACHE = {}  # key -> (ts, payload)
+# --- HOT PATH CACHE + WARMER (minimal, per-process) ---
+_CACHE: dict[str, dict] = {}   # key -> {"data":..., "fresh_until": ts, "refreshing": bool}
+CACHE_TTL = int(os.getenv("PROPS_TTL", "25"))       # seconds fresh
+SWR_EXTRA = int(os.getenv("PROPS_SWR_EXTRA", "90")) # seconds stale-while-revalidate window
 
-def _cache_get(key, ttl=30):
-    item = _RESP_CACHE.get(key)
-    if not item: return None
-    ts, payload = item
-    return payload if (time.time() - ts) < ttl else None
+def _cache_key(league: str, date_str: str, tier: str) -> str:
+    return f"props:{league}:{date_str}:{tier}"
 
-def _cache_set(key, payload):
-    _RESP_CACHE[key] = (time.time(), payload)
+def _cache_get(key: str):
+    e = _CACHE.get(key)
+    if not e: return None, False, False
+    now = time.time()
+    fresh = now < e["fresh_until"]
+    refreshing = bool(e.get("refreshing"))
+    return e["data"], fresh, refreshing
+
+def _cache_set(key: str, payload: dict, ttl: int = CACHE_TTL):
+    _CACHE[key] = {
+        "data": payload,
+        "fresh_until": time.time() + ttl,
+        "refreshing": False,
+        "swr_until": time.time() + ttl + SWR_EXTRA,
+    }
+
+def _cache_mark_refreshing(key: str) -> bool:
+    e = _CACHE.setdefault(key, {})
+    if e.get("refreshing"):  # already refreshing
+        return False
+    e["refreshing"] = True
+    return True
+
+def _cache_clear_refreshing(key: str):
+    e = _CACHE.get(key)
+    if e: e["refreshing"] = False
+
+def _american_to_imp(o):
+    o = float(o)
+    return 100/(o+100) if o >= 0 else (-o)/((-o)+100)
+
+def _ensure_fair_prob(p):
+    try:
+        if p.get("fair",{}).get("prob",{}).get("over") is not None:
+            return True
+    except Exception:
+        pass
+    over = p.get("over_odds") or p.get("odds_over") or p.get("overPrice") or p.get("odds",{}).get("over_odds")
+    under= p.get("under_odds") or p.get("odds_under") or p.get("underPrice") or p.get("odds",{}).get("under_odds")
+    if over is None or under is None: return False
+    try:
+        po, pu = _american_to_imp(over), _american_to_imp(under)
+        d = po + pu
+        if d <= 0: return False
+        p.setdefault("fair",{}).setdefault("prob",{})
+        p["fair"]["prob"]["over"]  = round(po/d, 6)
+        p["fair"]["prob"]["under"] = round(1 - p["fair"]["prob"]["over"], 6)
+        return True
+    except Exception:
+        return False
+
+def _enrich_and_overlay(props: list, league: str):
+    """Small budget enrichment for MLB batters, then AI overlay."""
+    # Budgeted enrichment (prevents dog-slow first loads)
+    if os.getenv("ENRICHMENT_ENABLED","false").lower() in ("1","true","yes","on") and league=="mlb":
+        try:
+            from contextual import get_mlb_contextual_hit_rate_cached as ctx
+        except Exception:
+            ctx = None
+        if ctx:
+            deadline = time.time() + float(os.getenv("CTX_BUDGET_SEC","1.8"))
+            max_props = int(os.getenv("CTX_MAX_PROPS","200"))
+            STAT_OK = {"batter_hits","hits","batter_total_bases","total_bases","tb",
+                       "batter_home_runs","home_runs","batter_runs","runs",
+                       "batter_runs_batted_in","rbi","batter_walks","walks",
+                       "batter_stolen_bases","stolen_bases"}
+            count = 0
+            for p in props:
+                if count >= max_props or time.time() > deadline: break
+                stat = str(p.get("stat","")).lower()
+                if ("batter" in stat) or (stat in STAT_OK):
+                    try:
+                        c = ctx(p.get("player",""), p.get("stat",""), float(p.get("line",0) or 0))
+                        if c: p.setdefault("enrichment",{})["mlb_context"] = c; count += 1
+                    except Exception:
+                        pass
+
+    # Ensure fair prob always exists (cheap)
+    for p in props:
+        try: _ensure_fair_prob(p)
+        except Exception: pass
+
+    # Overlay (cheap, O(n))
+    if os.getenv("AI_OVERLAY_ENABLED","false").lower() in ("1","true","yes","on") and league=="mlb":
+        try:
+            from ai_overlay import attach_mlb_ai_overlay
+            min_edge = float(os.getenv("AI_MIN_EDGE","0.06"))
+            attach_mlb_ai_overlay(props, min_edge=min_edge)
+        except Exception:
+            pass
+
+def _build_props_bundle(league: str, date_str: str) -> dict:
+    # Fetch (your existing fetchers)
+    if league == "mlb":
+        from odds_api import fetch_player_props as fetch_mlb_player_props
+        props = fetch_mlb_player_props()
+    elif league == "nfl":
+        from nfl_odds_api import fetch_nfl_player_props
+        props = fetch_nfl_player_props(hours_ahead=96)
+    elif league == "ncaaf":
+        from props_ncaaf import fetch_ncaaf_player_props
+        props = fetch_ncaaf_player_props(date=date_str)
+    else:
+        props = []
+
+    _enrich_and_overlay(props, league)
+    return {"props": props, "meta": {"league": league, "date": date_str}}
+
+def _warm_async(league: str, date_str: str, tier: str):
+    key = _cache_key(league, date_str, tier)
+    if not _cache_mark_refreshing(key):
+        return
+    def run():
+        try:
+            bundle = _build_props_bundle(league, date_str)
+            _cache_set(key, bundle, CACHE_TTL)
+        finally:
+            _cache_clear_refreshing(key)
+    threading.Thread(target=run, daemon=True).start()
 
 log = logging.getLogger("app")
 log.setLevel(logging.INFO)
@@ -98,6 +214,27 @@ def _perf_finish(resp):
             perf.push_current()
         perf.disable()
     return resp
+
+# Warm up once at startup
+@app.before_first_request
+def _warm_once():
+    try:
+        # Warm MLB today for "free" tier (adjust if you use tiers)
+        _warm_async("mlb", "today", "free")
+    except Exception:
+        pass
+
+# Optional manual warm endpoint (handy for you)
+@app.get("/__diag/warm")
+def __diag_warm():
+    tok = os.getenv("CTX_DIAG_TOKEN")
+    if tok and request.args.get("token") != tok:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    league = (request.args.get("league") or "mlb").lower()
+    date_q = (request.args.get("date") or "today")
+    tier = "free"
+    _warm_async(league, date_q, tier)
+    return jsonify({"ok": True, "status": "warming", "league": league, "date": date_q})
 
 # Public routes
 @app.route("/")
@@ -449,77 +586,32 @@ def get_props():
         date_str = request.args.get("date")  # YYYY-MM-DD optional
         log.info("props: league=%s (norm=%s) date=%s", league_in, league, date_str)
 
-        # Hot-path cache check
-        cache_key = f"props:{request.args.get('league','all')}:{request.args.get('date','today')}:{session.get('user_tier','free')}"
-        hit = _cache_get(cache_key, ttl=int(os.getenv("PROPS_TTL", "25")))
-        if hit is not None:
-            resp = jsonify(hit)
-            resp.headers["X-Cache"] = "HIT"
+        # SWR cache check
+        league = (request.args.get("league") or "mlb").lower()
+        date_str = request.args.get("date") or "today"
+        tier = session.get("user_tier","free")
+        key = _cache_key(league, date_str, tier)
+
+        cached, fresh, refreshing = _cache_get(key)
+        now = time.time()
+        entry = _CACHE.get(key)
+        swr_ok = entry and now < entry.get("swr_until", 0)
+
+        if cached and (fresh or swr_ok):
+            # Serve cached immediately, trigger revalidate in background if stale
+            if not fresh:
+                _warm_async(league, date_str, tier)
+            resp = jsonify(cached)
+            resp.headers["X-Cache"] = "HIT-FRESH" if fresh else "HIT-STALE"
             return resp
 
-        # --- tiny cache wrapper (safe) ---
-        ttl = int(os.getenv("PROPS_CACHE_SEC", "60"))
-        nocache = request.args.get("nocache") == "1"
-        cache_key = f"props:{league}:{date_str or ''}"
-        if not nocache:
-            cached = cache_get(cache_key)
-            if cached is not None:
-                return jsonify(cached)
+
 
         if league == "mlb":
             props = fetch_mlb_player_props()
             
-            # Apply MLB contextual enrichment (guarded by feature flag)
-            try:
-                if ENRICHMENT_ENABLED:
-                    from contextual import get_mlb_contextual_hit_rate_cached
-                    
-                    # --- Enrichment budget + local de-dup ---
-                    CTX_BUDGET_SEC = float(os.getenv("CTX_BUDGET_SEC", "1.8"))   # ~1.8s max spend
-                    CTX_MAX_PROPS  = int(os.getenv("CTX_MAX_PROPS", "200"))      # enrich at most 200 props
-                    deadline = time.time() + CTX_BUDGET_SEC
-                    _local_ctx_cache = {}  # (player, stat, line) -> context dict
-
-                    count = 0
-                    for p in props:
-                        if count >= CTX_MAX_PROPS or time.time() > deadline:
-                            break
-                        stat = str(p.get("stat","")).lower()
-                        if ("batter" in stat) or (stat in {
-                            "batter_hits","hits","batter_total_bases","total_bases","tb",
-                            "batter_home_runs","home_runs","batter_runs","runs",
-                            "batter_runs_batted_in","rbi","batter_walks","walks",
-                            "batter_stolen_bases","stolen_bases"
-                        }):
-                            k = (p.get("player",""), p.get("stat",""), float(p.get("line",0) or 0.0))
-                            ctx = _local_ctx_cache.get(k)
-                            if ctx is None:
-                                try:
-                                    ctx = get_mlb_contextual_hit_rate_cached(*k)
-                                except Exception:
-                                    ctx = None
-                                _local_ctx_cache[k] = ctx
-                            if ctx:
-                                p.setdefault("enrichment", {})["mlb_context"] = ctx
-                                count += 1
-            except Exception:
-                # never break the endpoint if something goes wrong
-                pass
-            
-            # Apply MLB AI overlay (guarded by feature flag)
-            try:
-                if AI_OVERLAY_ENABLED:
-                    # ensure fair prob on each prop first (no-op if already present)
-                    for p in props:
-                        try:
-                            _ensure_fair_prob(p)
-                        except Exception:
-                            pass
-                    
-                    from ai_overlay import attach_mlb_ai_overlay
-                    attach_mlb_ai_overlay(props, min_edge=float(os.getenv("AI_MIN_EDGE","0.06")))
-            except Exception:
-                pass
+            # Apply enrichment and AI overlay
+            _enrich_and_overlay(props, league)
             
             # Group by matchup - need to create matchup from event data
             grouped = {}
@@ -533,21 +625,19 @@ def get_props():
                     grouped[matchup] = []
                 grouped[matchup].append(prop)
             
-            # Set cache before returning
-            try:
-                cache_setex(cache_key, ttl, grouped)
-            except Exception:
-                pass
-            
-            # Set hot-path cache
+            # Set SWR cache
             payload = {"props": props, "meta": {"league": league, "date": date_str}}
-            _cache_set(cache_key, payload)
+            _cache_set(key, payload, CACHE_TTL)
             resp = jsonify(grouped)
             resp.headers["X-Cache"] = "MISS"
             return resp
 
         elif league == "nfl":
             props = fetch_nfl_player_props(hours_ahead=96)
+            
+            # Apply enrichment and AI overlay
+            _enrich_and_overlay(props, league)
+            
             # Group by matchup
             grouped = {}
             for prop in props:
@@ -556,15 +646,19 @@ def get_props():
                     grouped[matchup] = []
                 grouped[matchup].append(prop)
             
-            # Set cache before returning
-            try:
-                cache_setex(cache_key, ttl, grouped)
-            except Exception:
-                pass
-            return jsonify(grouped)
+            # Set SWR cache
+            payload = {"props": props, "meta": {"league": league, "date": date_str}}
+            _cache_set(key, payload, CACHE_TTL)
+            resp = jsonify(grouped)
+            resp.headers["X-Cache"] = "MISS"
+            return resp
 
         elif league == "ncaaf":
             props = fetch_ncaaf_player_props(date=date_str)
+            
+            # Apply enrichment and AI overlay
+            _enrich_and_overlay(props, league)
+            
             # Group by matchup
             grouped = {}
             for prop in props:
@@ -573,16 +667,20 @@ def get_props():
                     grouped[matchup] = []
                 grouped[matchup].append(prop)
             
-            # Set cache before returning
-            try:
-                cache_setex(cache_key, ttl, grouped)
-            except Exception:
-                pass
-            return jsonify(grouped)
+            # Set SWR cache
+            payload = {"props": props, "meta": {"league": league, "date": date_str}}
+            _cache_set(key, payload, CACHE_TTL)
+            resp = jsonify(grouped)
+            resp.headers["X-Cache"] = "MISS"
+            return resp
 
         elif league == "ufc":
             # Use the existing UFC totals function
             props = fetch_ufc_totals_props(date_iso=date_str, hours_ahead=96)
+            
+            # Apply enrichment and AI overlay
+            _enrich_and_overlay(props, league)
+            
             # Group by matchup
             grouped = {}
             for prop in props:
@@ -591,12 +689,12 @@ def get_props():
                     grouped[matchup] = []
                 grouped[matchup].append(prop)
             
-            # Set cache before returning
-            try:
-                cache_setex(cache_key, ttl, grouped)
-            except Exception:
-                pass
-            return jsonify(grouped)
+            # Set SWR cache
+            payload = {"props": props, "meta": {"league": league, "date": date_str}}
+            _cache_set(key, payload, CACHE_TTL)
+            resp = jsonify(grouped)
+            resp.headers["X-Cache"] = "MISS"
+            return resp
 
         else:
             raise ValueError(f"Unsupported league: {league_in}")

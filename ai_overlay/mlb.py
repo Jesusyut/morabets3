@@ -19,7 +19,7 @@ def _get_baseline_over(prop: Dict[str, Any]) -> Optional[float]:
     except Exception:
         pass
     # Common flat fallbacks
-    for k in ("no_vig_prob_over", "fair_prob_over"):
+    for k in ("no_vig_prob_over","fair_prob_over","novig_over_prob","market_prob_over"):
         try:
             p = float(prop.get(k))
             if 0.0 <= p <= 1.0:
