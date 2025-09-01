@@ -67,11 +67,36 @@ def _ensure_fair_prob(p):
             return True
     except Exception:
         pass
+
+    # try common top-level keys
     over = p.get("over_odds") or p.get("odds_over") or p.get("overPrice") or p.get("odds",{}).get("over_odds")
     under= p.get("under_odds") or p.get("odds_under") or p.get("underPrice") or p.get("odds",{}).get("under_odds")
-    if over is None or under is None: return False
+
+    # NEW: fall back to prices list (best two-sided)
+    if (over is None or under is None) and isinstance(p.get("prices"), list):
+        best_over = best_under = None
+        for q in p["prices"]:
+            # various shapes seen in feeds
+            cand_over  = q.get("over")  or q.get("home")  or q.get("o")
+            cand_under = q.get("under") or q.get("away")  or q.get("u")
+            try:
+                if cand_over is not None and abs(float(cand_over)) >= 100:
+                    best_over = best_over or float(cand_over)
+                if cand_under is not None and abs(float(cand_under)) >= 100:
+                    best_under = best_under or float(cand_under)
+                if best_over is not None and best_under is not None:
+                    break
+            except Exception:
+                continue
+        over = over if over is not None else best_over
+        under= under if under is not None else best_under
+
+    if over is None or under is None:
+        return False
+
     try:
-        po, pu = _american_to_imp(over), _american_to_imp(under)
+        po = _american_to_imp(over)
+        pu = _american_to_imp(under)
         d = po + pu
         if d <= 0: return False
         p.setdefault("fair",{}).setdefault("prob",{})
@@ -83,29 +108,38 @@ def _ensure_fair_prob(p):
 
 def _enrich_and_overlay(props: list, league: str):
     """Small budget enrichment for MLB batters, then AI overlay."""
-    # Budgeted enrichment (prevents dog-slow first loads)
+    # Budgeted enrichment (unchanged guards)
     if os.getenv("ENRICHMENT_ENABLED","false").lower() in ("1","true","yes","on") and league=="mlb":
         try:
             from contextual import get_mlb_contextual_hit_rate_cached as ctx
         except Exception:
             ctx = None
         if ctx:
-            deadline = time.time() + float(os.getenv("CTX_BUDGET_SEC","1.8"))
-            max_props = int(os.getenv("CTX_MAX_PROPS","200"))
+            deadline = time.time() + float(os.getenv("CTX_BUDGET_SEC","1.2"))  # tighten the budget
+            max_props = int(os.getenv("CTX_MAX_PROPS","80"))                   # fewer per request
             STAT_OK = {"batter_hits","hits","batter_total_bases","total_bases","tb",
                        "batter_home_runs","home_runs","batter_runs","runs",
                        "batter_runs_batted_in","rbi","batter_walks","walks",
                        "batter_stolen_bases","stolen_bases"}
+
+            _local_ctx_cache: dict[tuple, dict] = {}  # <<< NEW
             count = 0
             for p in props:
-                if count >= max_props or time.time() > deadline: break
+                if count >= max_props or time.time() > deadline:
+                    break
                 stat = str(p.get("stat","")).lower()
                 if ("batter" in stat) or (stat in STAT_OK):
-                    try:
-                        c = ctx(p.get("player",""), p.get("stat",""), float(p.get("line",0) or 0))
-                        if c: p.setdefault("enrichment",{})["mlb_context"] = c; count += 1
-                    except Exception:
-                        pass
+                    k = (p.get("player",""), p.get("stat",""), float(p.get("line",0) or 0.0))
+                    ctx_payload = _local_ctx_cache.get(k)                      # <<< NEW
+                    if ctx_payload is None:
+                        try:
+                            ctx_payload = ctx(*k)
+                        except Exception:
+                            ctx_payload = None
+                        _local_ctx_cache[k] = ctx_payload                      # <<< NEW
+                    if ctx_payload:
+                        p.setdefault("enrichment",{})["mlb_context"] = ctx_payload
+                        count += 1
 
     # Ensure fair prob always exists (cheap)
     for p in props:
@@ -190,7 +224,7 @@ def _warm_once_guard():
             return
         try:
             # kick the async warmer; returns immediately
-            _warm_async("mlb", "today", "free")
+            _warm_async("mlb", "today", "all")
         except Exception:
             pass
         _WARM_ONCE_FLAG = True
@@ -614,8 +648,8 @@ def get_props():
         # SWR cache check
         league = (request.args.get("league") or "mlb").lower()
         date_str = request.args.get("date") or "today"
-        tier = session.get("user_tier","free")
-        key = _cache_key(league, date_str, tier)
+        # universal cache per league/date (works for all users)
+        key = _cache_key(league, date_str, "all")
 
         cached, fresh, refreshing = _cache_get(key)
         now = time.time()
@@ -625,7 +659,7 @@ def get_props():
         if cached and (fresh or swr_ok):
             # Serve cached immediately, trigger revalidate in background if stale
             if not fresh:
-                _warm_async(league, date_str, tier)
+                _warm_async(league, date_str, "all")
             resp = jsonify(cached)
             resp.headers["X-Cache"] = "HIT-FRESH" if fresh else "HIT-STALE"
             return resp
