@@ -1,9 +1,12 @@
 # contextual/mlb.py
 import os, math, time
 import requests
+import logging
 from datetime import date
 from functools import lru_cache
 import json
+
+LOG = logging.getLogger("contextual")
 
 MLB = "https://statsapi.mlb.com/api/v1"
 TIMEOUT = float(os.getenv("MLB_TIMEOUT","4"))
@@ -48,12 +51,20 @@ STAT_KEY_MAP = {
 }
 
 def _get(url, params=None, timeout=TIMEOUT):
+    t0 = time.time()
     for i in range(3):
         try:
             r = _session.get(url, params=params, timeout=timeout)
-            if r.ok: return r
-        except Exception:
-            if i == 2: raise
+            ok = (r.status_code == 200)
+            if not ok:
+                LOG.warning("mlbapi_call code=%s dur=%.2fs url=%s", r.status_code, time.time()-t0, url)
+                raise RuntimeError(f"mlbapi status {r.status_code}")
+            LOG.info("mlbapi_call ok=1 dur=%.2fs url=%s size=%d", time.time()-t0, url, len(r.content))
+            return r
+        except Exception as e:
+            if i == 2:
+                LOG.warning("mlbapi_error dur=%.2fs url=%s err=%s", time.time()-t0, url, e)
+                raise
             time.sleep(0.25*(i+1))
     raise RuntimeError("MLB request failed")
 

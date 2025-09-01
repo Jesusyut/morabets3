@@ -193,6 +193,40 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "mora-bets-secret-key-change-in-production")
 CORS(app)
 
+# --- MLB stats health probe ---
+import time
+from flask import request, jsonify
+
+@app.get("/__diag/stats_health")
+def stats_health():
+    """
+    Calls the same enrichment entrypoint used in /player_props.
+    If MLB (or your current provider) is down/slow, you'll see it here.
+    """
+    player = request.args.get("player", "Mookie Betts")
+    stat   = request.args.get("stat", "batter_hits")
+    line   = float(request.args.get("line", "0.5"))
+
+    t0 = time.time()
+    ok = False
+    err = None
+    ctx = None
+    try:
+        # use the same function the enrichment loop imports
+        from contextual import get_mlb_contextual_hit_rate_cached as ctx_fn
+        ctx = ctx_fn(player, stat, line)
+        ok = bool(ctx) and isinstance(ctx, dict)
+    except Exception as e:
+        err = str(e)
+    latency = round(time.time() - t0, 3)
+
+    return jsonify({
+        "ok": ok,
+        "latency_sec": latency,
+        "context": ctx,
+        "error": err,
+    })
+
 # --- Flask 3.x compatible "warm once" guard ---
 import threading
 
