@@ -475,6 +475,13 @@ def get_props():
             # Apply MLB AI overlay (guarded by feature flag)
             try:
                 if AI_OVERLAY_ENABLED:
+                    # ensure fair prob on each prop first (no-op if already present)
+                    for p in props:
+                        try:
+                            _ensure_fair_prob(p)
+                        except Exception:
+                            pass
+                    
                     from ai_overlay import attach_mlb_ai_overlay
                     attach_mlb_ai_overlay(props, min_edge=float(os.getenv("AI_MIN_EDGE","0.06")))
             except Exception:
@@ -654,48 +661,32 @@ def _extract_american_odds(prop):
                 pass
     return val_over, val_under
 
-def _ensure_fair_prob(prop):
-    """
-    If prop lacks fair.prob.over/under, compute from American odds and attach:
-      prop["fair"] = {"prob": {"over": p_over, "under": 1-p_over}}
-    Returns True if attached, False otherwise.
-    """
-    # already present?
+def _american_to_imp(o):
+    o = float(o)
+    return 100.0 / (o + 100.0) if o >= 0 else (-o) / ((-o) + 100.0)
+
+def _ensure_fair_prob(p):
     try:
-        if "fair" in prop and "prob" in prop["fair"] and "over" in prop["fair"]["prob"]:
+        if p.get("fair", {}).get("prob", {}).get("over") is not None:
             return True
     except Exception:
         pass
-
-    # try flat key if you use it
+    # common keys for American odds
+    over = p.get("over_odds") or p.get("odds_over") or p.get("overPrice") or p.get("odds", {}).get("over_odds")
+    under= p.get("under_odds") or p.get("odds_under") or p.get("underPrice") or p.get("odds", {}).get("under_odds")
     try:
-        p_over = float(prop.get("fair_prob_over"))
-        if 0 <= p_over <= 1:
-            prop.setdefault("fair", {}).setdefault("prob", {})
-            prop["fair"]["prob"]["over"] = round(p_over, 6)
-            prop["fair"]["prob"]["under"] = round(1.0 - p_over, 6)
-            return True
+        if over is None or under is None:
+            return False
+        po, pu = _american_to_imp(over), _american_to_imp(under)
+        denom = po + pu
+        if denom <= 0:
+            return False
+        p.setdefault("fair", {}).setdefault("prob", {})
+        p["fair"]["prob"]["over"]  = round(po / denom, 6)
+        p["fair"]["prob"]["under"] = round(1 - p["fair"]["prob"]["over"], 6)
+        return True
     except Exception:
-        pass
-
-    over_odds, under_odds = _extract_american_odds(prop)
-    if over_odds is None or under_odds is None:
         return False
-
-    p_over_imp  = _american_to_imp(over_odds)
-    p_under_imp = _american_to_imp(under_odds)
-    denom = p_over_imp + p_under_imp
-    if denom <= 0:
-        return False
-
-    # no-vig normalization
-    p_over_fair = p_over_imp / denom
-    p_under_fair = 1.0 - p_over_fair
-
-    prop.setdefault("fair", {}).setdefault("prob", {})
-    prop["fair"]["prob"]["over"]  = round(p_over_fair, 6)
-    prop["fair"]["prob"]["under"] = round(p_under_fair, 6)
-    return True
 
 @app.get("/__diag/ping")
 def __diag_ping():
