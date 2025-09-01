@@ -595,5 +595,93 @@ def perf_recent():
 def perf_cache():
     return jsonify({"cache": cache_metrics()})
 
+# --- DIAGNOSTICS: counts for enrichment + AI overlay (MLB only) ---
+import os, time
+from flask import jsonify, request
+
+DIAG_TOKEN = os.getenv("CTX_DIAG_TOKEN")  # set this in Render env
+
+def _bool_env(name, default="false"):
+    return os.getenv(name, default).lower() in ("1","true","yes","on")
+
+@app.get("/__diag/ai_counts")
+def __diag_ai_counts():
+    # guard: require token if set (so randoms can't hit this)
+    tok = request.args.get("token")
+    if DIAG_TOKEN and tok != DIAG_TOKEN:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+    league = (request.args.get("league") or "mlb").lower()
+    date_q = request.args.get("date") or "today"
+
+    props = []
+
+    try:
+        # fetch props like /player_props does (we only care about MLB here)
+        if league == "mlb":
+            # you already import this at the top:
+            # from odds_api import fetch_player_props as fetch_mlb_player_props
+            props = fetch_mlb_player_props()
+        elif league == "nfl":
+            props = fetch_nfl_player_props(hours_ahead=96)
+        elif league == "ncaaf":
+            props = fetch_ncaaf_player_props(date=date_q)
+        else:
+            return jsonify({"ok": False, "error": f"unsupported league '{league}'"}), 400
+
+        # attach enrichment (same logic you added for MLB batter props)
+        if _bool_env("ENRICHMENT_ENABLED"):
+            try:
+                from contextual import get_mlb_contextual_hit_rate_cached as ctx
+            except Exception:
+                ctx = None
+            if league == "mlb" and ctx:
+                for p in props:
+                    try:
+                        stat = str(p.get("stat","")).lower()
+                        if "batter" in stat or stat in {"hits","total_bases","tb","home_runs","runs","rbi","walks","stolen_bases"}:
+                            c = ctx(p.get("player",""), p.get("stat",""), float(p.get("line",0) or 0))
+                            p.setdefault("enrichment", {})["mlb_context"] = c
+                    except Exception:
+                        pass  # never break
+
+        # attach blender overlay (AI)
+        if _bool_env("AI_OVERLAY_ENABLED"):
+            try:
+                from ai_overlay import attach_mlb_ai_overlay
+                if league == "mlb":
+                    min_edge = float(os.getenv("AI_MIN_EDGE", "0.06"))
+                    attach_mlb_ai_overlay(props, min_edge=min_edge)
+            except Exception:
+                pass
+
+        total = len(props)
+        with_enrich = sum(1 for p in props if p.get("enrichment",{}).get("mlb_context"))
+        with_ai = sum(1 for p in props if p.get("ai",{}).get("model_ver") == "mlb-v0.1")
+
+        # include a tiny sample so you can eyeball the shape
+        sample = None
+        for p in props:
+            if p.get("enrichment",{}).get("mlb_context") or p.get("ai"):
+                sample = {
+                    "player": p.get("player"),
+                    "stat": p.get("stat"),
+                    "line": p.get("line"),
+                    "enrichment": p.get("enrichment",{}).get("mlb_context"),
+                    "ai": p.get("ai")
+                }
+                break
+
+        return jsonify({
+            "ok": True,
+            "league": league,
+            "total": total,
+            "with_enrich": with_enrich,
+            "with_ai": with_ai,
+            "sample": sample
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=5000)
