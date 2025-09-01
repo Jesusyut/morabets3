@@ -174,6 +174,38 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "mora-bets-secret-key-change-in-production")
 CORS(app)
 
+# --- Flask 3.x compatible "warm once" guard ---
+import threading
+
+_WARM_ONCE_FLAG = False
+_WARM_ONCE_LOCK = threading.Lock()
+
+def _warm_once_guard():
+    """Run warm once per worker process (non-blocking)."""
+    global _WARM_ONCE_FLAG
+    if _WARM_ONCE_FLAG:
+        return
+    with _WARM_ONCE_LOCK:
+        if _WARM_ONCE_FLAG:
+            return
+        try:
+            # kick the async warmer; returns immediately
+            _warm_async("mlb", "today", "free")
+        except Exception:
+            pass
+        _WARM_ONCE_FLAG = True
+
+# Best-effort: if Flask 3 provides before_serving, use it once
+if hasattr(app, "before_serving"):
+    @app.before_serving
+    def __warm_before_serving():
+        _warm_once_guard()
+
+# Fallback: ensure first request triggers the warm exactly once
+@app.before_request
+def __warm_before_request():
+    _warm_once_guard()
+
 # Stripe configuration
 stripe.api_key = os.environ.get('STRIPE_SECRET_KEY')
 LICENSE_DB = 'license_keys.json'
@@ -215,14 +247,7 @@ def _perf_finish(resp):
         perf.disable()
     return resp
 
-# Warm up once at startup
-@app.before_first_request
-def _warm_once():
-    try:
-        # Warm MLB today for "free" tier (adjust if you use tiers)
-        _warm_async("mlb", "today", "free")
-    except Exception:
-        pass
+
 
 # Optional manual warm endpoint (handy for you)
 @app.get("/__diag/warm")
