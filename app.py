@@ -595,93 +595,215 @@ def perf_recent():
 def perf_cache():
     return jsonify({"cache": cache_metrics()})
 
-# --- DIAGNOSTICS: counts for enrichment + AI overlay (MLB only) ---
+# --- FAST DIAGNOSTICS (no spinning) ---
 import os, time
 from flask import jsonify, request
 
-DIAG_TOKEN = os.getenv("CTX_DIAG_TOKEN")  # set this in Render env
+DIAG_TOKEN = os.getenv("CTX_DIAG_TOKEN")  # optional; set in Render
 
-def _bool_env(name, default="false"):
-    return os.getenv(name, default).lower() in ("1","true","yes","on")
+def _on(v: str | None, default=False):
+    if v is None: return default
+    return str(v).lower() in ("1","true","yes","on")
 
-@app.get("/__diag/ai_counts")
-def __diag_ai_counts():
-    # guard: require token if set (so randoms can't hit this)
+def _env_on(name: str, default=False):
+    return _on(os.getenv(name), default)
+
+# Helper to compute no-vig fair P(over/under) from American odds
+def _american_to_imp(odds):
+    """American odds -> implied probability (0..1). +110 -> 100/(110+100); -120 -> 120/(120+100)"""
+    o = float(odds)
+    if o >= 0:
+        return 100.0 / (o + 100.0)
+    else:
+        return (-o) / ((-o) + 100.0)
+
+def _extract_american_odds(prop):
+    """
+    Try common field names for over/under American odds.
+    Returns (over_odds, under_odds) as floats or (None, None).
+    """
+    cand_over = ["over_odds","odds_over","overOdds","overPrice","over_price","over"]
+    cand_under= ["under_odds","odds_under","underOdds","underPrice","under_price","under"]
+    # nested odds dict support
+    odds_block = prop.get("odds") or prop.get("prices") or {}
+    val_over = None; val_under = None
+    for k in cand_over:
+        v = prop.get(k)
+        if v is None and isinstance(odds_block, dict):
+            v = odds_block.get(k)
+        if v is not None:
+            try:
+                vv = float(v)
+                # American odds are typically <= -100 or >= +100
+                if abs(vv) >= 100:
+                    val_over = vv
+                    break
+            except Exception:
+                pass
+    for k in cand_under:
+        v = prop.get(k)
+        if v is None and isinstance(odds_block, dict):
+            v = odds_block.get(k)
+        if v is not None:
+            try:
+                vv = float(v)
+                if abs(vv) >= 100:
+                    val_under = vv
+                    break
+            except Exception:
+                pass
+    return val_over, val_under
+
+def _ensure_fair_prob(prop):
+    """
+    If prop lacks fair.prob.over/under, compute from American odds and attach:
+      prop["fair"] = {"prob": {"over": p_over, "under": 1-p_over}}
+    Returns True if attached, False otherwise.
+    """
+    # already present?
+    try:
+        if "fair" in prop and "prob" in prop["fair"] and "over" in prop["fair"]["prob"]:
+            return True
+    except Exception:
+        pass
+
+    over_odds, under_odds = _extract_american_odds(prop)
+    if over_odds is None or under_odds is None:
+        return False
+
+    p_over_imp  = _american_to_imp(over_odds)
+    p_under_imp = _american_to_imp(under_odds)
+    denom = p_over_imp + p_under_imp
+    if denom <= 0:
+        return False
+
+    # no-vig normalization
+    p_over_fair = p_over_imp / denom
+    p_under_fair = 1.0 - p_over_fair
+
+    prop.setdefault("fair", {}).setdefault("prob", {})
+    prop["fair"]["prob"]["over"]  = round(p_over_fair, 6)
+    prop["fair"]["prob"]["under"] = round(p_under_fair, 6)
+    return True
+
+@app.get("/__diag/ping")
+def __diag_ping():
+    tok = request.args.get("token")
+    if DIAG_TOKEN and tok != DIAG_TOKEN:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    return jsonify({
+        "ok": True,
+        "enrichment_enabled": _env_on("ENRICHMENT_ENABLED"),
+        "ai_overlay_enabled": _env_on("AI_OVERLAY_ENABLED"),
+    })
+
+@app.get("/__diag/ai_counts_fast")
+def __diag_ai_counts_fast():
+    """Fast counts with optional limited enrichment/AI overlay.
+       Params:
+         token=...       (required if CTX_DIAG_TOKEN is set)
+         league=mlb|nfl|ncaaf   (default mlb)
+         date=today|YYYY-MM-DD  (default today; only used by some leagues)
+         limit=10        (limit number of props processed)
+         enrich=0|1      (default 0; when 1, attach contextual for up to `limit` props)
+         ai=0|1          (default 1; when 1, run overlay on the already-fetched props)
+    """
     tok = request.args.get("token")
     if DIAG_TOKEN and tok != DIAG_TOKEN:
         return jsonify({"ok": False, "error": "unauthorized"}), 401
 
     league = (request.args.get("league") or "mlb").lower()
     date_q = request.args.get("date") or "today"
+    limit  = int(request.args.get("limit") or "10")
+    do_enrich = _on(request.args.get("enrich"), default=False)
+    do_ai = _on(request.args.get("ai"), default=True)
 
+    # 1) Fetch baseline props (same functions you already use)
     props = []
-
     try:
-        # fetch props like /player_props does (we only care about MLB here)
         if league == "mlb":
-            # you already import this at the top:
-            # from odds_api import fetch_player_props as fetch_mlb_player_props
+            from odds_api import fetch_player_props as fetch_mlb_player_props
             props = fetch_mlb_player_props()
         elif league == "nfl":
+            from nfl_odds_api import fetch_nfl_player_props
             props = fetch_nfl_player_props(hours_ahead=96)
         elif league == "ncaaf":
+            from props_ncaaf import fetch_ncaaf_player_props
             props = fetch_ncaaf_player_props(date=date_q)
         else:
             return jsonify({"ok": False, "error": f"unsupported league '{league}'"}), 400
-
-        # attach enrichment (same logic you added for MLB batter props)
-        if _bool_env("ENRICHMENT_ENABLED"):
-            try:
-                from contextual import get_mlb_contextual_hit_rate_cached as ctx
-            except Exception:
-                ctx = None
-            if league == "mlb" and ctx:
-                for p in props:
-                    try:
-                        stat = str(p.get("stat","")).lower()
-                        if "batter" in stat or stat in {"hits","total_bases","tb","home_runs","runs","rbi","walks","stolen_bases"}:
-                            c = ctx(p.get("player",""), p.get("stat",""), float(p.get("line",0) or 0))
-                            p.setdefault("enrichment", {})["mlb_context"] = c
-                    except Exception:
-                        pass  # never break
-
-        # attach blender overlay (AI)
-        if _bool_env("AI_OVERLAY_ENABLED"):
-            try:
-                from ai_overlay import attach_mlb_ai_overlay
-                if league == "mlb":
-                    min_edge = float(os.getenv("AI_MIN_EDGE", "0.06"))
-                    attach_mlb_ai_overlay(props, min_edge=min_edge)
-            except Exception:
-                pass
-
-        total = len(props)
-        with_enrich = sum(1 for p in props if p.get("enrichment",{}).get("mlb_context"))
-        with_ai = sum(1 for p in props if p.get("ai",{}).get("model_ver") == "mlb-v0.1")
-
-        # include a tiny sample so you can eyeball the shape
-        sample = None
-        for p in props:
-            if p.get("enrichment",{}).get("mlb_context") or p.get("ai"):
-                sample = {
-                    "player": p.get("player"),
-                    "stat": p.get("stat"),
-                    "line": p.get("line"),
-                    "enrichment": p.get("enrichment",{}).get("mlb_context"),
-                    "ai": p.get("ai")
-                }
-                break
-
-        return jsonify({
-            "ok": True,
-            "league": league,
-            "total": total,
-            "with_enrich": with_enrich,
-            "with_ai": with_ai,
-            "sample": sample
-        })
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": f"fetch failed: {e}"}), 500
+
+    total = len(props)
+    if total == 0:
+        return jsonify({"ok": True, "league": league, "total": 0, "with_enrich": 0, "with_ai": 0, "sample": None})
+
+    # Only process a small slice to keep responses snappy
+    props = props[:max(1, min(limit, total))]
+
+    # 2) (Optional) attach contextual enrichment for MLB batter props ONLY, under a tight budget
+    if do_enrich and league == "mlb" and _env_on("ENRICHMENT_ENABLED"):
+        try:
+            from contextual import get_mlb_contextual_hit_rate_cached as ctx
+            deadline = time.time() + float(os.getenv("DIAG_BUDGET_SEC", "2.0"))  # ~2s budget
+            STAT_OK = {"batter_hits","hits","batter_total_bases","total_bases","tb",
+                       "batter_home_runs","home_runs","batter_runs","runs",
+                       "batter_runs_batted_in","rbi","batter_walks","walks",
+                       "batter_stolen_bases","stolen_bases"}
+            for p in props:
+                if time.time() > deadline: break
+                stat = str(p.get("stat","")).lower()
+                if "batter" in stat or stat in STAT_OK:
+                    try:
+                        c = ctx(p.get("player",""), p.get("stat",""), float(p.get("line",0) or 0))
+                        p.setdefault("enrichment", {})["mlb_context"] = c
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    # 3) (Optional) attach blender AI overlay (uses enrichment if present; no network itself)
+    if do_ai and league == "mlb" and _env_on("AI_OVERLAY_ENABLED"):
+        try:
+            # make sure each prop has fair prob first
+            for p in props:
+                try:
+                    _ensure_fair_prob(p)
+                except Exception:
+                    pass
+            
+            from ai_overlay import attach_mlb_ai_overlay
+            min_edge = float(os.getenv("AI_MIN_EDGE", "0.06"))
+            attach_mlb_ai_overlay(props, min_edge=min_edge)
+        except Exception:
+            pass
+
+    with_enrich = sum(1 for p in props if p.get("enrichment",{}).get("mlb_context"))
+    with_ai     = sum(1 for p in props if p.get("ai",{}).get("model_ver") == "mlb-v0.1")
+
+    # include a small sample to eyeball
+    sample = None
+    for p in props:
+        if p.get("enrichment",{}).get("mlb_context") or p.get("ai"):
+            sample = {
+                "player": p.get("player"),
+                "stat": p.get("stat"),
+                "line": p.get("line"),
+                "enrichment": p.get("enrichment",{}).get("mlb_context"),
+                "ai": p.get("ai")
+            }
+            break
+
+    return jsonify({
+        "ok": True,
+        "league": league,
+        "total": total,
+        "tested": len(props),
+        "with_enrich": with_enrich,
+        "with_ai": with_ai,
+        "sample": sample
+    })
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=5000)
