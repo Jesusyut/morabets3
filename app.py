@@ -67,44 +67,29 @@ def _ensure_fair_prob(p):
             return True
     except Exception:
         pass
-
-    # try common top-level keys
     over = p.get("over_odds") or p.get("odds_over") or p.get("overPrice") or p.get("odds",{}).get("over_odds")
     under= p.get("under_odds") or p.get("odds_under") or p.get("underPrice") or p.get("odds",{}).get("under_odds")
-
-    # NEW: fall back to prices list (best two-sided)
+    # prices[] fallback
     if (over is None or under is None) and isinstance(p.get("prices"), list):
-        best_over = best_under = None
         for q in p["prices"]:
-            # various shapes seen in feeds
-            cand_over  = q.get("over")  or q.get("home")  or q.get("o")
-            cand_under = q.get("under") or q.get("away")  or q.get("u")
-            try:
-                if cand_over is not None and abs(float(cand_over)) >= 100:
-                    best_over = best_over or float(cand_over)
-                if cand_under is not None and abs(float(cand_under)) >= 100:
-                    best_under = best_under or float(cand_under)
-                if best_over is not None and best_under is not None:
-                    break
-            except Exception:
-                continue
-        over = over if over is not None else best_over
-        under= under if under is not None else best_under
-
+            if over is None:
+                for ko in ("over","o","home","over_odds","overPrice"):
+                    v=q.get(ko); 
+                    if v is not None and abs(float(v))>=100: over=float(v); break
+            if under is None:
+                for ku in ("under","u","away","under_odds","underPrice"):
+                    v=q.get(ku); 
+                    if v is not None and abs(float(v))>=100: under=float(v); break
+            if over is not None and under is not None: break
     if over is None or under is None:
         return False
-
-    try:
-        po = _american_to_imp(over)
-        pu = _american_to_imp(under)
-        d = po + pu
-        if d <= 0: return False
-        p.setdefault("fair",{}).setdefault("prob",{})
-        p["fair"]["prob"]["over"]  = round(po/d, 6)
-        p["fair"]["prob"]["under"] = round(1 - p["fair"]["prob"]["over"], 6)
-        return True
-    except Exception:
-        return False
+    po, pu = _american_to_imp(over), _american_to_imp(under)
+    d = po + pu
+    if d <= 0: return False
+    p.setdefault("fair",{}).setdefault("prob",{})
+    p["fair"]["prob"]["over"]  = round(po/d, 6)
+    p["fair"]["prob"]["under"] = round(1 - p["fair"]["prob"]["over"], 6)
+    return True
 
 def _enrich_and_overlay(props: list, league: str):
     """Small budget enrichment for MLB batters, then AI overlay."""
@@ -684,8 +669,11 @@ def get_props():
                     grouped[matchup] = []
                 grouped[matchup].append(prop)
             
+            # Count AI attachments for verification
+            ai_attached = sum(1 for p in props if p.get("ai",{}).get("model_ver") == "mlb-v0.1")
+            
             # Set SWR cache
-            payload = {"props": props, "meta": {"league": league, "date": date_str}, "groups": grouped}  # ← include groups
+            payload = {"props": props, "meta": {"league": league, "date": date_str, "ai_attached": ai_attached}, "groups": grouped}  # ← include groups
             _cache_set(key, payload, CACHE_TTL)
 
             # BEFORE
@@ -710,8 +698,11 @@ def get_props():
                     grouped[matchup] = []
                 grouped[matchup].append(prop)
             
+            # Count AI attachments for verification
+            ai_attached = sum(1 for p in props if p.get("ai",{}).get("model_ver") == "mlb-v0.1")
+            
             # Set SWR cache
-            payload = {"props": props, "meta": {"league": league, "date": date_str}, "groups": grouped}  # ← include groups
+            payload = {"props": props, "meta": {"league": league, "date": date_str, "ai_attached": ai_attached}, "groups": grouped}  # ← include groups
             _cache_set(key, payload, CACHE_TTL)
 
             # BEFORE
@@ -736,8 +727,11 @@ def get_props():
                     grouped[matchup] = []
                 grouped[matchup].append(prop)
             
+            # Count AI attachments for verification
+            ai_attached = sum(1 for p in props if p.get("ai",{}).get("model_ver") == "mlb-v0.1")
+            
             # Set SWR cache
-            payload = {"props": props, "meta": {"league": league, "date": date_str}, "groups": grouped}  # ← include groups
+            payload = {"props": props, "meta": {"league": league, "date": date_str, "ai_attached": ai_attached}, "groups": grouped}  # ← include groups
             _cache_set(key, payload, CACHE_TTL)
 
             # BEFORE
@@ -763,8 +757,11 @@ def get_props():
                     grouped[matchup] = []
                 grouped[matchup].append(prop)
             
+            # Count AI attachments for verification
+            ai_attached = sum(1 for p in props if p.get("ai",{}).get("model_ver") == "mlb-v0.1")
+            
             # Set SWR cache
-            payload = {"props": props, "meta": {"league": league, "date": date_str}, "groups": grouped}  # ← include groups
+            payload = {"props": props, "meta": {"league": league, "date": date_str, "ai_attached": ai_attached}, "groups": grouped}  # ← include groups
             _cache_set(key, payload, CACHE_TTL)
 
             # BEFORE

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import math
+import os
 from typing import Any, Dict, List, Optional
 
 # Optional: use contextual if available
@@ -8,24 +9,46 @@ try:
 except Exception:
     ctx_cached = None  # type: ignore
 
+ALLOW_ANY_STAT = os.getenv("AI_OVERLAY_PERMISSIVE","false").lower() in ("1","true","on")
 
-def _get_baseline_over(prop: Dict[str, Any]) -> Optional[float]:
-    """Find the market fair P(over) on the prop dict."""
-    # Primary shape
+
+def _get_baseline_over(prop):
+    # primary
     try:
-        p = float(prop.get("fair", {}).get("prob", {}).get("over"))
-        if 0.0 <= p <= 1.0:
-            return p
+        p = float(prop.get("fair",{}).get("prob",{}).get("over"))
+        if 0 <= p <= 1: return p
     except Exception:
         pass
-    # Common flat fallbacks
+    # flat fallbacks
     for k in ("no_vig_prob_over","fair_prob_over","novig_over_prob","market_prob_over"):
         try:
             p = float(prop.get(k))
-            if 0.0 <= p <= 1.0:
-                return p
+            if 0 <= p <= 1: return p
         except Exception:
             pass
+    # odds-in-prices fallback (common in some books)
+    prices = prop.get("prices")
+    if isinstance(prices, list):
+        over = under = None
+        for q in prices:
+            for ko in ("over","o","home","over_odds","overPrice"): 
+                if ko in q and abs(float(q[ko])) >= 100: 
+                    over = over or float(q[ko])
+            for ku in ("under","u","away","under_odds","underPrice"): 
+                if ku in q and abs(float(q[ku])) >= 100: 
+                    under = under or float(q[ku])
+            if over is not None and under is not None:
+                break
+        if over is not None and under is not None:
+            def _american_to_imp(o):
+                return 100/(o+100) if o>=0 else (-o)/((-o)+100)
+            po, pu = _american_to_imp(over), _american_to_imp(under)
+            d = po + pu
+            if d > 0: 
+                return po/d
+    # last resort for testing only: allow when permissive
+    if ALLOW_ANY_STAT:
+        return 0.5
     return None
 
 
@@ -67,8 +90,10 @@ def compute_mlb_ai_overlay(prop: Dict[str, Any], min_edge: float = 0.06) -> Opti
         "batter_walks", "walks",
         "batter_stolen_bases", "stolen_bases",
     }
-    if ("batter" not in stat) and (stat not in STAT_OK):
-        return None
+    if not (("batter" in stat) or (stat in STAT_OK)):
+        if not ALLOW_ANY_STAT:
+            return None
+        # permissive test mode falls through and still computes
 
     p_mkt = _get_baseline_over(prop)
     if p_mkt is None:
