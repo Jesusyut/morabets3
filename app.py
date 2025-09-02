@@ -700,10 +700,10 @@ def get_props():
             
             # Apply new enrichment system
             try:
-                from enrichment_v2 import enrich_props_mlb_v2
-                enriched_count = enrich_props_mlb_v2(props)
+                from contextual_simple import enrich_props_mlb_simple
+                enriched_count = enrich_props_mlb_simple(props)
             except Exception as e:
-                log.warning(f"Enrichment v2 failed: {e}")
+                logging.warning(f"Contextual simple enrichment failed: {e}")
                 enriched_count = 0
             
             # Cache odds data for fast retrieval (example of cache_utils usage)
