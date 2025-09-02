@@ -10,6 +10,12 @@ except Exception:
     ctx_cached = None  # type: ignore
 
 ALLOW_ANY_STAT = os.getenv("AI_OVERLAY_PERMISSIVE","false").lower() in ("1","true","on")
+USE_HEUR = os.getenv("AI_OVERLAY_HEURISTIC","false").lower() in ("1","true","on")
+HEUR_W   = float(os.getenv("AI_HEUR_WEIGHT","0.6"))
+
+def _clamp01(x): 
+    x = float(x); 
+    return 0.0 if x<0 else 1.0 if x>1 else x
 
 
 def _get_baseline_over(prop):
@@ -97,6 +103,28 @@ def compute_mlb_ai_overlay(prop: Dict[str, Any], min_edge: float = 0.06) -> Opti
 
     p_mkt = _get_baseline_over(prop)
     if p_mkt is None:
+        # try heuristic if we have enrichment but no model output
+        ctx = prop.get("enrichment",{}).get("mlb_context",{})
+        p_ctx = ctx.get("hit_rate") or ctx.get("hit_rate_smooth") or ctx.get("hit_rate_raw")
+
+        if USE_HEUR and (p_ctx is not None):
+            # Use a neutral fallback when no market probability available
+            p_fallback = 0.5
+            p_model = _clamp01(HEUR_W * float(p_ctx) + (1.0-HEUR_W) * p_fallback)
+            edge_over  = round(p_model - p_fallback, 6)
+            edge_under = round((1.0 - p_model) - (1.0 - p_fallback), 6)
+            flag_over  = edge_over  >= float(min_edge)
+            flag_under = (-edge_over) >= float(min_edge)
+            return {
+                "model_ver":"mlb-v0.1h",  # heuristic version tag
+                "p_model_over":  round(p_model, 6),
+                "p_model_under": round(1.0 - p_model, 6),
+                "edge_over":  edge_over,
+                "edge_under": edge_under,
+                "flag_over":  flag_over,
+                "flag_under": flag_under,
+                "inputs": {"heuristic": True}
+            }
         return None
 
     ctx = _derive_ctx(prop)
