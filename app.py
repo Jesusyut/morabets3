@@ -22,6 +22,9 @@ from novig import american_to_prob, novig_two_way
 from cache_ttl import metrics as cache_metrics, get as cache_get, setex as cache_setex
 import perf
 
+# Cache utilities
+from cache_utils import cache_get as redis_cache_get, cache_set as redis_cache_set, cache_incr, cache_exists, cache_backend
+
 # --- HOT PATH CACHE + WARMER (minimal, per-process) ---
 _CACHE: dict[str, dict] = {}   # key -> {"data":..., "fresh_until": ts, "refreshing": bool}
 CACHE_TTL = int(os.getenv("PROPS_TTL", "25"))       # seconds fresh
@@ -703,6 +706,12 @@ def get_props():
                 log.warning(f"Enrichment v2 failed: {e}")
                 enriched_count = 0
             
+            # Cache odds data for fast retrieval (example of cache_utils usage)
+            try:
+                redis_cache_set("mlb_odds_latest", {"count": len(props), "timestamp": time.time()}, ex=1800)  # 30 min TTL
+            except Exception:
+                pass  # non-blocking
+            
             # Apply enrichment and AI overlay (existing system)
             _enrich_and_overlay(props, league)
             
@@ -887,7 +896,18 @@ def healthz():
 @app.route("/ping")
 def ping():
     """Ping endpoint"""
-    return jsonify({"status": "running"})
+    # Increment hit counter (example of cache_utils usage)
+    hits = cache_incr("ping_hits")
+    return jsonify({"status": "running", "cache": cache_backend(), "hits": hits})
+
+@app.route("/api/status")
+def api_status():
+    """API status endpoint"""
+    return jsonify({
+        "ok": True,
+        "cache_backend": cache_backend(),
+        "timestamp": datetime.now().isoformat(),
+    })
 
 @app.route("/logout")
 def logout():
