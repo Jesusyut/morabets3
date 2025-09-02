@@ -688,7 +688,22 @@ def get_props():
         if league == "mlb":
             props = fetch_mlb_player_props()
             
-            # Apply enrichment and AI overlay
+            # Ensure fair probabilities exist before enrichment
+            for p in props:
+                try:
+                    _ensure_fair_prob(p)
+                except Exception:
+                    pass
+            
+            # Apply new enrichment system
+            try:
+                from enrichment_v2 import enrich_props_mlb_v2
+                enriched_count = enrich_props_mlb_v2(props)
+            except Exception as e:
+                log.warning(f"Enrichment v2 failed: {e}")
+                enriched_count = 0
+            
+            # Apply enrichment and AI overlay (existing system)
             _enrich_and_overlay(props, league)
             
             # --- EDGE FINDER SMOKE-TEST BACKSTOP (safe, guarded) ---
@@ -730,8 +745,8 @@ def get_props():
                 _force_attach_ai(props, cap=int(os.getenv("EDGEFINDER_FORCED_CAP", "50")))
                 ai_attached = sum(1 for q in props if q.get("ai", {}).get("model_ver") == "mlb-v0.1")
 
-            # expose a small counter for quick verification
-            meta = {"league": league, "date": date_str, "ai_attached": ai_attached}
+            # expose counters for verification
+            meta = {"league": league, "date": date_str, "ai_attached": ai_attached, "enriched": enriched_count}
             
             # Group by matchup - need to create matchup from event data
             grouped = {}
