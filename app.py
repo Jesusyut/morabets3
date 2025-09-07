@@ -379,21 +379,34 @@ def api_league_props(league):
     date_str = request.args.get("date")
     nocache  = (request.args.get("nocache") == "1")
 
-    rows = get_player_props_for_league(league, date_str=date_str, nocache=nocache)
+    # 1) fetch + EV attach (already computes meta.* fields)
+    rows  = get_player_props_for_league(league, date_str=date_str, nocache=nocache)
     props = _attach_ev_and_filter(rows)
 
-    try:
-        grouped = group_props_by_matchup(props, league)
-    except Exception as e:
-        log.exception("group_props_by_matchup failed: %s", e)
-        grouped = {}
+    # 2) BACK-COMPAT for FE: mirror meta → ai.* so UI stops showing 0%
+    for r in props:
+        m = r.get("meta", {})
+        r.setdefault("ai", {})
+        r["ai"]["edge_over"]    = m.get("over_edge_pct")     # pp vs breakeven
+        r["ai"]["edge_under"]   = m.get("under_edge_pct")
+        r["ai"]["ev_over_pct"]  = m.get("over_ev_pct")       # EV %
+        r["ai"]["ev_under_pct"] = m.get("under_ev_pct")
 
+    # 3) Stable ordering: sort by BEST EV side, desc
+    def best_ev(row):
+        m = row.get("meta", {})
+        a = m.get("over_ev_pct")  or -1e9
+        b = m.get("under_ev_pct") or -1e9
+        return max(a, b)
+    props.sort(key=best_ev, reverse=True)
+
+    # 4) Return FLAT list + empty matchups so FE won’t regroup/reorder
     return jsonify({
         "league": league,
         "date": date_str,
         "count": len(props),
         "props": props,
-        "matchups": grouped,
+        "matchups": {},            # <— disables “sort by matchup” behavior in FE
         "enrichment_applied": True
     })
 
@@ -404,13 +417,33 @@ def player_props_legacy():
     date_str = request.args.get("date")
     nocache  = (request.args.get("nocache") == "1")
 
-    rows = get_player_props_for_league(lg, date_str=date_str, nocache=nocache)
+    rows  = get_player_props_for_league(lg, date_str=date_str, nocache=nocache)
     props = _attach_ev_and_filter(rows)
-    grouped = group_props_by_matchup(props, lg)
+
+    # FE back-compat
+    for r in props:
+        m = r.get("meta", {})
+        r.setdefault("ai", {})
+        r["ai"]["edge_over"]    = m.get("over_edge_pct")
+        r["ai"]["edge_under"]   = m.get("under_edge_pct")
+        r["ai"]["ev_over_pct"]  = m.get("over_ev_pct")
+        r["ai"]["ev_under_pct"] = m.get("under_ev_pct")
+
+    # EV ordering
+    def best_ev(row):
+        m = row.get("meta", {})
+        a = m.get("over_ev_pct")  or -1e9
+        b = m.get("under_ev_pct") or -1e9
+        return max(a, b)
+    props.sort(key=best_ev, reverse=True)
 
     return jsonify({
-        "league": lg, "date": date_str, "count": len(props),
-        "props": props, "matchups": grouped, "enrichment_applied": True
+        "league": lg,
+        "date": date_str,
+        "count": len(props),
+        "props": props,
+        "matchups": {},            # keep empty to avoid regroup on FE
+        "enrichment_applied": True
     })
 
 # -----------------------------------------------------------------------------
