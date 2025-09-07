@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mora Bets</title>
+  <link rel="preconnect" href="https://www.morabets.com">
+  <style>
+    :root{--bg:#0f1420;--card:#161b28;--stroke:#2b3245;--text:#e6e9f2;--muted:#9aa4bf;--green:#2dd36f;--amber:#f9d65a;}
+    html,body{background:var(--bg);color:var(--text);margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif}
+    .wrap{max-width:1200px;margin:0 auto;padding:24px 16px 56px}
+    .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+    h1{margin:0;font-size:22px}
+    .muted{color:var(--muted)}
+    .tabs{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 10px}
+    .tab{background:transparent;color:var(--muted);border:1px solid var(--stroke);padding:8px 12px;border-radius:999px;cursor:pointer}
+    .tab.active{color:var(--text);border-color:#7c6dff;box-shadow:0 0 0 1px #7c6dff inset}
+    .search{width:100%;max-width:420px;padding:10px 12px;border-radius:10px;background:var(--card);border:1px solid var(--stroke);color:var(--text)}
+    .toolbar{display:flex;gap:8px;align-items:center;margin:10px 0 18px}
+    .grid{display:grid;grid-template-columns:repeat(1,minmax(0,1fr));gap:14px}
+    @media(min-width:900px){.grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+    .card{background:var(--card);border:1px solid var(--stroke);border-radius:14px;padding:14px}
+    .row{display:flex;justify-content:space-between;align-items:center;gap:12px}
+    .pill{font-size:12px;border:1px solid var(--stroke);padding:3px 8px;border-radius:999px;color:#cbd3ee}
+    .over{color:var(--green);font-weight:600}
+    .under{color:var(--amber)}
+    .tiny-link{display:inline-flex;align-items:center;gap:6px;color:#9dd0ff;font-size:12px;cursor:pointer;text-decoration:none;border-bottom:1px dashed #2b3245}
+    .tiny-link:hover{color:#cfe6ff}
+    
+    .edge-badge {
+      display: inline-block;
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #1e9d59;   /* green-ish */
+      color: #fff;
+      margin-left: 8px;
+      line-height: 18px;
+      user-select: none;
+    }
+    
+    /* Hide market tabs (defensive) */
+    #market-tabs { display: none !important; }
+    
+    /* big loading overlay */
+    .loading{
+      position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+      background:rgba(10,14,24,.85);backdrop-filter:saturate(140%) blur(2px);
+      z-index:10;flex-direction:column;text-align:center;padding:24px
+    }
+    .spinner{width:44px;height:44px;border:3px solid #2b3245;border-top-color:#9dd0ff;border-radius:50%;animation:spin 0.9s linear infinite;margin-bottom:12px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    
+    /* AI Scout Modal Styles */
+    .modal{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:9999}
+    .modal.hidden{display:none}
+    .modal-inner{background:#121317;border:1px solid #2a2d36;border-radius:14px;min-width:720px;max-width:1020px;max-height:80vh;overflow:auto;box-shadow:0 10px 40px rgba(0,0,0,.5)}
+    .modal-head{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid #1f2230}
+    .modal-head .title{font-weight:700}
+    .modal-head .x{background:transparent;border:none;color:#aab2c8;font-size:20px;cursor:pointer}
+    .modal-body{padding:16px 18px}
+    .muted{color:#9aa3b2}
+    .error{color:#ff6b6b}
+    .hidden{display:none}
+    .sec{margin-top:10px}
+    .sec-title{font-weight:600;margin:6px 0 10px 0}
+    .pick-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+    .pick{border:1px solid #22293a;border-radius:12px;padding:10px 12px;background:#0f1116}
+    .pick .hdr{display:flex;justify-content:space-between;margin-bottom:6px}
+    .badge{display:inline-block;font-size:12px;padding:2px 8px;border-radius:999px;background:#1e9d59;color:#fff}
+    .small{font-size:12px}
+  </style>
+</head>
+<body>
+  <div id="loading" class="loading">
+    <div class="spinner"></div>
+    <div style="font-weight:700">Loading 1,000+ props…</div>
+    <div class="muted" style="margin-top:6px">This can take a few seconds on first load.</div>
+  </div>
+
+  <div class="wrap">
+    <div class="top">
+      <h1>Mora Bets</h1>
+      <div class="muted"><span id="count">–</span> props</div>
+    </div>
+
+    <!-- League tabs -->
+    <div class="tabs" id="tabs">
+      <button class="tab active" data-league="mlb">MLB</button>
+      <button class="tab" data-league="nfl">NFL</button>
+      <button class="tab" data-league="nba">NBA</button>
+      <button class="tab" data-league="nhl">NHL</button>
+      <button class="tab" data-league="ufc">UFC</button>
+      <button class="tab" data-league="ncaa">NCAA</button>
+    </div>
+
+    <div class="toolbar">
+      <input id="q" class="search" placeholder="Search players or stats…" />
+      <div id="sortMode" class="tabs" style="margin-left:auto">
+        <button id="sortEdge" class="tab sorttab" data-sort="edge">AI Edge Finder</button>
+        <button id="btn-ai-scout" class="tab" style="margin-left:12px;">View AI Picks</button>
+      </div>
+    </div>
+
+    <div id="props" class="grid"></div>
+  </div>
+
+
+
+<script>
+(async function(){
+  const grid = document.getElementById('props');
+  const countEl = document.getElementById('count');
+  const q = document.getElementById('q');
+  const tabs = document.getElementById('tabs');
+  const loader = document.getElementById('loading');
+
+  let league = 'mlb';
+  const today = new Date().toISOString().slice(0,10);
+  
+  // Set AI edge threshold globally
+  window.AI_MIN_EDGE = 0.06;
+
+  const esc = (s)=> (s??'').toString().replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[m]));
+  const pct = (x)=> Math.round((Number(x)||0)*100);
+  function americanToProb(odds){ if(odds==null) return 0; const o=Number(odds); if(!isFinite(o)||o===0) return 0; return o>0?100/(o+100):(-o)/(100-o); }
+
+  // -------------- sorting logic --------------
+  let SORTMODE = localStorage.getItem('sortMode') || 'edge';
+  let PROPS_CACHE = []; // last fetched list
+
+  function sortProps(props, mode) {
+    if (mode === 'edge') {
+      // sort by model edge descending; fallback to fair if no ai
+      return [...props].sort((a, b) => {
+        const ea = (a.ai?.edge_over ?? 0);
+        const eb = (b.ai?.edge_over ?? 0);
+        if (eb !== ea) return eb - ea;
+        const fa = a.fair?.prob?.over ?? 0;
+        const fb = b.fair?.prob?.over ?? 0;
+        return fb - fa;
+      });
+    }
+    // default: market fair probability desc
+    return [...props].sort((a, b) => (b.fair?.prob?.over ?? 0) - (a.fair?.prob?.over ?? 0));
+  }
+
+  // ensure 'edge' sort reads p.ai?.edge_over (fallback 0)
+  function valueForSort(p) {
+    if (SORTMODE === 'edge') return (p.ai && typeof p.ai.edge_over === 'number') ? p.ai.edge_over : 0;
+    // keep other modes if you have them
+    return (p.fair && p.fair.prob && p.fair.prob.over) || 0;
+  }
+
+  // Edge badge rendering (existing CSS ok)
+  function edgeBadge(p) {
+    const e = (p.ai && p.ai.edge_over) || 0;
+    if (e >= (window.AI_MIN_EDGE || 0.06)) {
+      const pct = Math.round(e * 100);
+      return `<span class="edge-badge">Edge +${pct}%</span>`;
+    }
+    return '';
+  }
+
+  function resortAndRender(){
+    const arr = sortProps(PROPS_CACHE, SORTMODE);
+    countEl.textContent = arr.length.toLocaleString();
+    grid.innerHTML = arr.length ? arr.map(renderCard).join('') : `<div class="card"><div class="muted">No props found.</div></div>`;
+  }
+
+  (function initSortToggle(){
+    const bar = document.getElementById('sortMode');
+    if (!bar) return;
+    function sync(){
+      document.getElementById('sortEdge')?.classList.toggle('active', SORTMODE === 'edge');
+    }
+    bar.addEventListener('click', (e)=>{
+      const btn = e.target.closest('[data-sort]');
+      if (!btn) return;
+      SORTMODE = btn.dataset.sort;
+      localStorage.setItem('sortMode', SORTMODE);
+      sync();
+      resortAndRender(); // re-rank instantly, no refetch
+    });
+    sync();
+  })();
+
+  // NEW: map FE stat names to backend's expected names (batter_* etc.)
+  function mapStatForContext(s){
+    const t = String(s||'').toLowerCase();
+    const m = {
+      // batter stats
+      "hits":"batter_hits",
+      "total_bases":"batter_total_bases",
+      "tb":"batter_total_bases",
+      "home_runs":"batter_home_runs",
+      "runs":"batter_runs",
+      "rbi":"batter_runs_batted_in",
+      "walks":"batter_walks",
+      "stolen_bases":"batter_stolen_bases",
+      // pitching (if rendered)
+      "strikeouts":"pitcher_strikeouts",
+      "earned_runs":"pitcher_earned_runs",
+      "hits_allowed":"pitcher_hits_allowed",
+      "outs":"pitcher_outs",
+      "walks_allowed":"pitcher_walks"
+    };
+    return m[t] || s;
+  }
+
+  function flatten(data){
+    if(Array.isArray(data)) return data;
+    if(data && typeof data==='object'){
+      const out=[]; for(const [k, arr] of Object.entries(data)){ if(Array.isArray(arr)) for(const p of arr){ out.push({...p, matchup:k}); } }
+      return out;
+    }
+    return [];
+  }
+
+  function scoreOver(p){
+    const fair = p?.fair?.prob?.over ?? 0;
+    return (fair && fair>0) ? fair : americanToProb(p?.odds);
+  }
+
+
+
+  function renderCard(p){
+    const over = pct(p?.fair?.prob?.over ?? 0);
+    const under = pct(p?.fair?.prob?.under ?? 0);
+    const src = (p?.fair?.book || p?.shop || '').toString().toUpperCase();
+    const stat = (p?.stat ?? '').toString();
+    
+    return `
+      <div class="card" data-name="${esc((p.player||'').toLowerCase())}" data-stat="${esc(stat.toLowerCase())}">
+        <div class="row">
+          <div class="muted">${esc(p.matchup || '')}</div>
+          <div class="pill">${esc(stat)} ${esc(p.line)}</div>
+        </div>
+        <div style="margin-top:8px;font-weight:700">
+          ${esc(p.player || '')}
+          ${(() => {
+            const edge = p.ai?.edge_over ?? 0;
+            const th   = Number(window.AI_MIN_EDGE ?? 0.06);  // set once on page load or hardcode
+            if (edge >= th) {
+              const pct = Math.round(edge * 100);
+              return `<span class="edge-badge">Edge +${pct}%</span>`;
+            }
+            return '';
+          })()}
+        </div>
+        <div style="margin-top:10px">
+          <div class="over">Over ${over}%</div>
+          <div class="under">Under ${under}%</div>
+        </div>
+        <div class="muted" style="margin-top:8px;font-size:12px">${src ? `Source: ${esc(src)}` : ''}</div>
+      </div>
+    `;
+  }
+
+  async function fetchAllProps(){
+    const urls = [
+      `/player_props?league=${league}&date=${today}`,
+      `/player_props?league=${league}`
+    ];
+    for(const url of urls){
+      try{
+        const res = await fetch(url, {cache:"no-store"});
+        if(!res.ok) continue;
+        const json = await res.json();
+        return flatten(json);
+      }catch(e){}
+    }
+    return [];
+  }
+
+  async function loadLeague(newLeague){
+    league = newLeague || league;
+    window.ACTIVE_LEAGUE = league; // Set global for AI scout modal
+    Array.from(tabs.querySelectorAll('.tab')).forEach(b=> b.classList.toggle('active', b.dataset.league===league));
+    loader.style.display = 'flex';
+    grid.innerHTML = '';
+    countEl.textContent = '–';
+
+    const all = await fetchAllProps();
+    PROPS_CACHE = all;
+    resortAndRender();
+    loader.style.display = 'none';
+  }
+
+  // search filter
+  q.addEventListener('input', ()=>{
+    const term=(q.value||'').trim().toLowerCase();
+    for(const el of grid.children){
+      if(!term){ el.style.display=''; continue; }
+      const name=el.getAttribute('data-name')||'';
+      const stat=el.getAttribute('data-stat')||'';
+      el.style.display=(name.includes(term)||stat.includes(term))?'':'none';
+    }
+  });
+
+  // tabs
+  tabs.addEventListener('click', (e)=>{
+    const btn = e.target.closest('.tab'); if(!btn) return;
+    if(btn.dataset.league === league) return;
+    loadLeague(btn.dataset.league);
+  });
+
+  // Put this near your other globals
+  const API_BASE = ""; // same-origin API; if your backend is on another host, set it explicitly
+
+  // initial load
+  loadLeague('mlb');
+})();
+
+
+
+// ------------- STAT SUGGESTIONS FUNCTIONALITY -------------
+(() => {
+  // ---------- Config ----------
+  const MAP = (() => {
+    const m = {
+      mlb: [
+        "batter_hits","player_hits",
+        "player_total_bases","player_home_runs","player_rbis","player_runs","player_stolen_bases",
+        "pitcher_strikeouts","pitcher_outs","pitcher_hits_allowed","pitcher_walks","pitcher_earned_runs"
+      ],
+      nfl: [
+        "player_pass_yds","player_pass_tds",
+        "player_rush_yds","player_rush_attempts","player_rush_tds",
+        "player_reception_yds","player_receptions","player_reception_tds",
+        "player_anytime_td"
+      ],
+      ncaaf: [
+        "player_pass_yds","player_pass_tds",
+        "player_rush_yds","player_rush_attempts","player_rush_tds",
+        "player_reception_yds","player_receptions","player_reception_tds",
+        "player_anytime_td"
+      ],
+      ufc: ["fight_total_rounds"],
+      nba: [],
+      nhl: []
+    };
+    // de-dup + alpha sort for cleanliness
+    for (const k of Object.keys(m)) {
+      m[k] = Array.from(new Set(m[k])).sort((a,b)=>a.localeCompare(b));
+    }
+    return m;
+  })();
+
+  // ---------- Remove/hide old market pills if present ----------
+  document.addEventListener('DOMContentLoaded', () => {
+    const old = document.getElementById('market-tabs');
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+  });
+  window.reRenderWithMarketFilter = window.reRenderWithMarketFilter || function(){};
+
+  // ---------- Datalist wiring ----------
+  function ensureDatalist() {
+    let dl = document.getElementById('stat-suggestions');
+    if (!dl) {
+      dl = document.createElement('datalist');
+      dl.id = 'stat-suggestions';
+      document.body.appendChild(dl);
+    }
+    const input = document.querySelector('.search');
+    if (input && input.getAttribute('list') !== 'stat-suggestions') {
+      input.setAttribute('list', 'stat-suggestions');
+      // keep your existing search handler untouched
+    }
+    return dl;
+  }
+
+  function setSuggestions(league) {
+    const dl = ensureDatalist();
+    const key = (league||'mlb').toLowerCase();
+    const items = MAP[key] || [];
+    dl.innerHTML = items.map(v => `<option value="${v}"></option>`).join('');
+  }
+
+  // ---------- Detect active league on load ----------
+  function detectInitialLeague() {
+    const active = document.querySelector('.tabs .tab.active');
+    if (!active) return 'mlb';
+    const t = (active.textContent||'').trim().toLowerCase();
+    return ['mlb','nfl','ncaaf','ufc','nba','nhl'].includes(t) ? t : 'mlb';
+  }
+
+  // ---------- Integrate with existing league change flow ----------
+  function wrapLoadLeagueOnce() {
+    const fn = window.loadLeague;
+    if (typeof fn === 'function' && !fn.__wrapped_for_suggestions__) {
+      window.loadLeague = async function(league, ...rest) {
+        const result = await fn.call(this, league, ...rest);
+        setSuggestions(league);
+        return result;
+      };
+      window.loadLeague.__wrapped_for_suggestions__ = true;
+    }
+  }
+
+  // Fallback: listen for clicks on league tabs
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.tabs .tab');
+    if (!btn) return;
+    const t = (btn.textContent||'').trim().toLowerCase();
+    if (['mlb','nfl','ncaaf','ufc','nba','nhl'].includes(t)) {
+      setSuggestions(t);
+    }
+  });
+
+  // ---------- Boot ----------
+  document.addEventListener('DOMContentLoaded', () => {
+    wrapLoadLeagueOnce();
+    setSuggestions(detectInitialLeague());
+  });
+})();
+
+// AI Scout Modal Functionality
+(function(){
+  const modal = document.getElementById('ai-scout-modal');
+  const btnOpen = document.getElementById('btn-ai-scout');
+  const btnClose = document.getElementById('close-ai-scout');
+  const elLoad = document.getElementById('ai-scout-loading');
+  const elErr  = document.getElementById('ai-scout-error');
+  const elWrap = document.getElementById('ai-scout-content');
+  const elBase = document.getElementById('ai-scout-base');
+  const elUpg  = document.getElementById('ai-scout-upg');
+
+  function esc(s){ return (s??'').toString().replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
+  function pickCard(p){
+    // p fields come from ai_scout.merge_and_gate: player, market, side, line, best_book, best_odds, prob, value_score, rationale, ev
+    const pct = Math.round((Number(p.prob)||0)*100);
+    const ev  = (Number(p.ev)||0).toFixed(2);
+    return `
+      <div class="pick">
+        <div class="hdr">
+          <div><strong>${esc(p.player)}</strong></div>
+          <div class="badge">EV ${ev}u</div>
+        </div>
+        <div class="small">${esc(p.market)} ${esc(p.side)} ${esc(p.line)}</div>
+        <div class="small">Best: ${esc(p.best_book)} ${esc(p.best_odds>0?'+':'')}${esc(p.best_odds)}</div>
+        <div class="small">Model p: ${pct}%</div>
+        ${p.rationale ? `<div class="small" style="margin-top:6px;color:#b8c2d6">${esc(p.rationale)}</div>` : ``}
+      </div>
+    `;
+  }
+
+  async function fetchPicks(){
+    const league = window.ACTIVE_LEAGUE || 'mlb';
+    const url = `/api/ai_scout?league=${encodeURIComponent(league)}`;
+    elLoad.classList.remove('hidden');
+    elErr.classList.add('hidden');
+    elWrap.classList.add('hidden');
+    elBase.innerHTML = elUpg.innerHTML = '';
+    try{
+      const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
+      const j = await r.json();
+      if(!j.ok){ throw new Error(j.error||'Failed'); }
+      const base = j.base || [];
+      const upg  = j.upgrades || [];
+      elBase.innerHTML = base.map(pickCard).join('') || `<div class="muted">No base picks yet.</div>`;
+      elUpg.innerHTML  = upg.map(pickCard).join('')  || `<div class="muted">No upgrade picks yet.</div>`;
+      elLoad.classList.add('hidden');
+      elWrap.classList.remove('hidden');
+    }catch(err){
+      elLoad.classList.add('hidden');
+      elErr.textContent = (err && err.message) ? err.message : 'Error loading picks';
+      elErr.classList.remove('hidden');
+    }
+  }
+
+  function openModal(){ modal.classList.remove('hidden'); fetchPicks(); }
+  function closeModal(){ modal.classList.add('hidden'); }
+
+  btnOpen?.addEventListener('click', openModal);
+  btnClose?.addEventListener('click', closeModal);
+  modal?.addEventListener('click', (e)=>{ if(e.target === modal) closeModal(); });
+})();
+</script>
+
+<!-- AI Scout Modal -->
+<div id="ai-scout-modal" class="modal hidden">
+  <div class="modal-inner">
+    <div class="modal-head">
+      <div class="title">AI Edge Picks</div>
+      <button id="close-ai-scout" class="x">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="ai-scout-loading" class="muted">Loading picks…</div>
+      <div id="ai-scout-error" class="error hidden"></div>
+      <div id="ai-scout-content" class="hidden">
+        <div class="sec">
+          <div class="sec-title">Top Base Picks</div>
+          <div id="ai-scout-base" class="pick-grid"></div>
+        </div>
+        <div class="sec">
+          <div class="sec-title">Upgrade Shots</div>
+          <div id="ai-scout-upg" class="pick-grid"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
