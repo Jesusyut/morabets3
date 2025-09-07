@@ -270,60 +270,53 @@ def require_license():
 def get_player_props_for_league(league: str, *, date_str: str | None = None, nocache: bool = False):
     league = _norm_league(league or "mlb")
 
+    # ---------- MLB ----------
     if league == "mlb":
         def _fetch():
-            props = fetch_mlb_player_props()
+            props = fetch_mlb_player_props()  # per-event fetcher
             if (not props) and fetch_mlb_player_props_simple:
                 try:
-                    props = fetch_mlb_player_props_simple()
+                    props = fetch_mlb_player_props_simple()  # whole-board fallback
                 except Exception:
                     pass
             return props or []
+
         if nocache:
             props = _fetch()
             set_json(slot_key("props", "mlb"), props)
             return props
         return get_or_set_slot("props", "mlb", _fetch)
-        
-        if league == "mlb":
-    def _fetch():
-        props = fetch_mlb_player_props()  # your per-event function
-        if (not props):
-            try:
-                from odds_api import fetch_player_props_simple
-                props = fetch_player_props_simple()
-            except Exception:
-                pass
-        return props or []
-    if nocache:
-        props = _fetch()
-        set_json(slot_key("props","mlb"), props)
-        return props
-    return get_or_set_slot("props","mlb", _fetch)
 
-
-    if league == "nfl":
+    # ---------- NFL ----------
+    elif league == "nfl":
+        from nfl_odds_api import fetch_nfl_player_props
         if nocache:
             props = fetch_nfl_player_props(hours_ahead=96)
             set_json(slot_key("props", "nfl"), props)
             return props
         return get_or_set_slot("props", "nfl", lambda: fetch_nfl_player_props(hours_ahead=96))
 
-    if league == "ncaaf":
+    # ---------- NCAAF ----------
+    elif league == "ncaaf":
+        from props_ncaaf import fetch_ncaaf_player_props
         if nocache:
             props = fetch_ncaaf_player_props(date=date_str)
             set_json(slot_key("props", "ncaaf"), props)
             return props
         return get_or_set_slot("props", "ncaaf", lambda: fetch_ncaaf_player_props(date=date_str))
 
-    if league == "ufc":
+    # ---------- UFC ----------
+    elif league == "ufc":
+        from props_ufc import fetch_ufc_totals_props
         if nocache:
             props = fetch_ufc_totals_props(date_iso=date_str, hours_ahead=96)
             set_json(slot_key("props", "ufc"), props)
             return props
         return get_or_set_slot("props", "ufc", lambda: fetch_ufc_totals_props(date_iso=date_str, hours_ahead=96))
 
-    return []
+    # ---------- Unsupported ----------
+    else:
+        raise ValueError(f"Unsupported league: {league}")
 
 # -----------------------------------------------------------------------------
 # EV attach + guardrails
