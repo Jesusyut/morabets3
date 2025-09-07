@@ -326,48 +326,82 @@ def _attach_ev_and_filter(props):
     Expects each prop row to have:
       - row["fair"]["prob"]["over"/"under"] (no-vig p*)
       - row["shop"]["over"/"under"]["american"] (offered price)
-    Attaches:
-      - meta.over_breakeven / under_breakeven
-      - meta.over_edge_pct / under_edge_pct
-      - meta.over_ev_pct / under_ev_pct
+    Attaches (under row["meta"]):
+      - over_breakeven / under_breakeven
+      - over_edge_pct / under_edge_pct (percentage points, e.g. +3.4)
+      - over_ev_pct / under_ev_pct (expected value %, e.g. +6.6)
     Filters heavy juice unless real edge.
     """
+    VIG_SHAVE_PP = float(os.getenv("VIG_SHAVE_PP", "0.02"))  # 0.02 = 2 percentage points
+
     out = []
-    for row in props or []:
+    for row in (props or []):
         fair = (row.get("fair") or {}).get("prob") or {}
         shop = row.get("shop") or {}
-        over_am = (shop.get("over") or {}).get("american")
+        over_am  = (shop.get("over")  or {}).get("american")
         under_am = (shop.get("under") or {}).get("american")
-        p_over = fair.get("over")
-        p_under = fair.get("under")
+        p_over   = fair.get("over")
+        p_under  = fair.get("under")
 
+        # --- Single-sided “vig shave” ---
+        # If only one side is priced and fair == breakeven (i.e., derived from same price),
+        # shave a small PP from the implied prob to approximate a no-vig fair.
+        try:
+            if over_am is not None and under_am is None:
+                be_over = book_breakeven_prob(int(over_am))
+                if p_over is None:
+                    p_over = be_over
+                if abs(p_over - be_over) < 1e-6:
+                    p_over  = max(0.01, min(0.99, be_over - VIG_SHAVE_PP))
+                    p_under = 1.0 - p_over if p_under is None else p_under
+
+            if under_am is not None and over_am is None:
+                be_under = book_breakeven_prob(int(under_am))
+                if p_under is None:
+                    p_under = be_under
+                if abs(p_under - be_under) < 1e-6:
+                    p_under = max(0.01, min(0.99, be_under - VIG_SHAVE_PP))
+                    p_over  = 1.0 - p_under if p_over is None else p_over
+        except Exception:
+            pass
+        # --- end shave ---
+
+        # Write back adjusted fair so FE stays consistent
+        row.setdefault("fair", {}).setdefault("prob", {})
+        if p_over  is not None: row["fair"]["prob"]["over"]  = round(p_over, 4)
+        if p_under is not None: row["fair"]["prob"]["under"] = round(p_under, 4)
+
+        # Compute breakeven / edge / EV%
         row.setdefault("meta", {})
         m = row["meta"]
 
         def side_stats(p_true, american, side_key):
-            if p_true is None or american is None: return
-            be = book_breakeven_prob(int(american))
+            if p_true is None or american is None:
+                return
+            be   = book_breakeven_prob(int(american))
             edge = float(p_true) - be
             m[f"{side_key}_breakeven"] = round(be, 4)
-            m[f"{side_key}_edge_pct"]  = round(edge*100.0, 2)
+            m[f"{side_key}_edge_pct"]  = round(edge * 100.0, 2)           # percentage points
             m[f"{side_key}_ev_pct"]    = round(ev_pct(float(p_true), int(american)), 2)
 
-        side_stats(p_over, over_am, "over")
+        side_stats(p_over,  over_am,  "over")
         side_stats(p_under, under_am, "under")
 
+        # Guardrails: hide heavy juice / high p* unless edge clears threshold
         def hide(p_true, american):
-            if p_true is None or american is None: return False
+            if p_true is None or american is None:
+                return False
             be = book_breakeven_prob(int(american))
-            # Hide heavy juice and high p* unless they CLEAR edge threshold
             if int(american) < MIN_AMERICAN_SINGLE or float(p_true) > MAX_TRUE_PROB_SINGLE:
                 return (float(p_true) - be) < MIN_EDGE_SINGLE
-            # Otherwise require minimal edge too
             return (float(p_true) - be) < MIN_EDGE_SINGLE
 
-        drop_over  = hide(p_over, over_am)
+        drop_over  = hide(p_over,  over_am)
         drop_under = hide(p_under, under_am)
+
         if not (drop_over and drop_under):
             out.append(row)
+
     return out
 
 # -----------------------------------------------------------------------------
