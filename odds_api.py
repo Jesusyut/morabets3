@@ -9,8 +9,6 @@ from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 from copy import deepcopy
 from typing import Dict, Any, List, Tuple, Optional
-from contextual import get_contextual_hit_rate
-from fantasy import get_fantasy_hit_rate
 from novig import american_to_prob, novig_two_way as no_vig_two_way
 
 logger = logging.getLogger(__name__)
