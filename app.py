@@ -135,6 +135,29 @@ LICENSE_DB = os.environ.get("LICENSE_DB_PATH", "license_keys.json")
 def home():
     return redirect(url_for("access"))
 
+@app.route("/_debug/mlb")
+def _debug_mlb():
+    from odds_api import fetch_player_props as per_event
+    out = {"ok": True}
+    try:
+        a = per_event()
+        out["per_event_count"] = len(a or [])
+        out["per_event_sample_market"] = (a[0].get("market") if a else None)
+    except Exception as e:
+        out["per_event_error"] = str(e)
+
+    try:
+        from odds_api import fetch_player_props_simple as simple
+        b = simple()
+        out["simple_count"] = len(b or [])
+        out["simple_sample_market"] = (b[0].get("market") if b else None)
+    except Exception as e:
+        out["simple_error"] = str(e)
+
+    out["env_has_api_key"] = bool(os.getenv("ODDS_API_KEY"))
+    return jsonify(out)
+
+
 @app.route("/access", methods=["GET"])
 def access():
     """
