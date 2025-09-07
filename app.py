@@ -379,34 +379,37 @@ def api_league_props(league):
     date_str = request.args.get("date")
     nocache  = (request.args.get("nocache") == "1")
 
-    # 1) fetch + EV attach (already computes meta.* fields)
+    # 1) fetch + EV attach
     rows  = get_player_props_for_league(league, date_str=date_str, nocache=nocache)
     props = _attach_ev_and_filter(rows)
 
-    # 2) BACK-COMPAT for FE: mirror meta → ai.* so UI stops showing 0%
+    # 2) BACK-COMPAT for FE: mirror meta → ai.*
     for r in props:
         m = r.get("meta", {})
         r.setdefault("ai", {})
-        r["ai"]["edge_over"]    = m.get("over_edge_pct")     # pp vs breakeven
-        r["ai"]["edge_under"]   = m.get("under_edge_pct")
-        r["ai"]["ev_over_pct"]  = m.get("over_ev_pct")       # EV %
-        r["ai"]["ev_under_pct"] = m.get("under_ev_pct")
+        # EV% (the thing you want to display)
+        if "over_ev_pct" in m:   r["ai"]["ev_over_pct"]  = m["over_ev_pct"]
+        if "under_ev_pct" in m:  r["ai"]["ev_under_pct"] = m["under_ev_pct"]
+        # Edge as DECIMAL (0.03 = +3pp), not percent
+        if "over_edge_pct" in m:  r["ai"]["edge_over"]  = round((m["over_edge_pct"]  or 0.0) / 100.0, 4)
+        if "under_edge_pct" in m: r["ai"]["edge_under"] = round((m["under_edge_pct"] or 0.0) / 100.0, 4)
+        # Clean source string (avoid [OBJECT OBJECT])
+        src = (r.get("shop", {}).get("over", {}) or r.get("shop", {}).get("under", {}))
+        r["source"] = (src.get("book") or r.get("book") or r.get("bookmaker") or "").upper()
 
-    # 3) Stable ordering: sort by BEST EV side, desc
+    # 3) Stable ordering: sort by best EV side, desc
     def best_ev(row):
         m = row.get("meta", {})
-        a = m.get("over_ev_pct")  or -1e9
-        b = m.get("under_ev_pct") or -1e9
-        return max(a, b)
+        return max(m.get("over_ev_pct") or -1e9, m.get("under_ev_pct") or -1e9)
     props.sort(key=best_ev, reverse=True)
 
-    # 4) Return FLAT list + empty matchups so FE won’t regroup/reorder
+    # 4) Return FLAT list; empty matchups prevents FE regroup/re-sort
     return jsonify({
         "league": league,
         "date": date_str,
         "count": len(props),
         "props": props,
-        "matchups": {},            # <— disables “sort by matchup” behavior in FE
+        "matchups": {},
         "enrichment_applied": True
     })
 
@@ -420,21 +423,20 @@ def player_props_legacy():
     rows  = get_player_props_for_league(lg, date_str=date_str, nocache=nocache)
     props = _attach_ev_and_filter(rows)
 
-    # FE back-compat
+    # FE back-compat (same as modern route)
     for r in props:
         m = r.get("meta", {})
         r.setdefault("ai", {})
-        r["ai"]["edge_over"]    = m.get("over_edge_pct")
-        r["ai"]["edge_under"]   = m.get("under_edge_pct")
-        r["ai"]["ev_over_pct"]  = m.get("over_ev_pct")
-        r["ai"]["ev_under_pct"] = m.get("under_ev_pct")
+        if "over_ev_pct" in m:   r["ai"]["ev_over_pct"]  = m["over_ev_pct"]
+        if "under_ev_pct" in m:  r["ai"]["ev_under_pct"] = m["under_ev_pct"]
+        if "over_edge_pct" in m:  r["ai"]["edge_over"]  = round((m["over_edge_pct"]  or 0.0) / 100.0, 4)
+        if "under_edge_pct" in m: r["ai"]["edge_under"] = round((m["under_edge_pct"] or 0.0) / 100.0, 4)
+        src = (r.get("shop", {}).get("over", {}) or r.get("shop", {}).get("under", {}))
+        r["source"] = (src.get("book") or r.get("book") or r.get("bookmaker") or "").upper()
 
-    # EV ordering
     def best_ev(row):
         m = row.get("meta", {})
-        a = m.get("over_ev_pct")  or -1e9
-        b = m.get("under_ev_pct") or -1e9
-        return max(a, b)
+        return max(m.get("over_ev_pct") or -1e9, m.get("under_ev_pct") or -1e9)
     props.sort(key=best_ev, reverse=True)
 
     return jsonify({
@@ -442,7 +444,7 @@ def player_props_legacy():
         "date": date_str,
         "count": len(props),
         "props": props,
-        "matchups": {},            # keep empty to avoid regroup on FE
+        "matchups": {},
         "enrichment_applied": True
     })
 
