@@ -159,3 +159,17 @@ def no_vig_two_way(odds_a, odds_b):
     if s == 0: 
         return None, None
     return pa/s, pb/s
+    def american_to_decimal(odds: int) -> float:
+    o = float(odds)
+    return 1.0 + (o/100.0 if o > 0 else 100.0/abs(o))
+
+def book_breakeven_prob(american: int) -> float:
+    d = american_to_decimal(american)
+    return 1.0 / d
+
+def ev_value(p_true: float, american: int) -> float:
+    d = american_to_decimal(american)
+    return p_true*(d - 1.0) - (1.0 - p_true)
+
+def ev_pct(p_true: float, american: int) -> float:
+    return ev_value(p_true, american) * 100.0
