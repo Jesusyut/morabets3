@@ -284,6 +284,23 @@ def get_player_props_for_league(league: str, *, date_str: str | None = None, noc
             set_json(slot_key("props", "mlb"), props)
             return props
         return get_or_set_slot("props", "mlb", _fetch)
+        
+        if league == "mlb":
+    def _fetch():
+        props = fetch_mlb_player_props()  # your per-event function
+        if (not props):
+            try:
+                from odds_api import fetch_player_props_simple
+                props = fetch_player_props_simple()
+            except Exception:
+                pass
+        return props or []
+    if nocache:
+        props = _fetch()
+        set_json(slot_key("props","mlb"), props)
+        return props
+    return get_or_set_slot("props","mlb", _fetch)
+
 
     if league == "nfl":
         if nocache:
